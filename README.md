@@ -16,7 +16,7 @@ Rules learning parameters:
 - **-p** **--num_processes**, number of parallel processes, for accelerating. 
 - **-s** **--seed**, for reproduction purposes.
 - **-m** **--mining**, the rule mining approach, default: ragtkgc, other choices are gtkg and ragtkgc_no_walks (our algorithm but without walks, only start mining from each unique quadruple)
-    
+
 You will get a rule bank file similar to "060723022344_r[1,2,3]_n200_exp_s12_rules.json" under the RAGTKGC/data/processed_new/{dataset_name}/output/{dataset_name} folder.
 
 ### History retrieving
@@ -35,7 +35,7 @@ History retrieving parameters:
 - **-t** **--retrieve_type**, the underlying mining algorithm to use; default: TLogic (TLogic-3), other choice is bs (check the original paper for more details).
 - **-r** **--name_of_rules_file**, the name of the file where the rules are stored.
 - **--l** **--rule_length_all**, boolean value to set whether to use rule of lengths greater than 1 or not; default: True, set to False if you have rule banks with rule lengths greater than 1 and do not want to use them for facts retrieval.
-- 
+
 Output is saved at:
 - RAGTKGC/data/processed_new/{dataset_name}/{rule_learning_algorithm}/[train, valid, test]/history_facts/history_facts_{dataset}.txt [A]
 - RAGTKGC/data/processed_new/{dataset_name}/{rule_learning_algorithm}/[train, valid, test]/history_facts/history_facts_{dataset}_idx_fine_tune_all.txt
@@ -61,4 +61,4 @@ Create JSON train parameters:
 - **--path_save**, where to save the results.
 - **--nums_sample**, how many samples to convert for training; default: 16 (and the whole set). For example, you can write '16,32,128' if you want files with those amounts of trainins samples, besides the whole set.
 - **--name_train**, the name of the output file; default: "icews18".
-- 
+
