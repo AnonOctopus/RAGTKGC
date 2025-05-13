@@ -54,6 +54,9 @@ Position on the RAGTKGC root folder. An example for icews18 train split would be
 ```
 python data_utils/create_json_train.py --dir_of_trainset data/processed_new/icews18/ragtkgc/train/history_facts/history_facts_icews18.txt --dir_of_answers  data/processed_new/icews18/ragtkgc/train/test_answers/test_answers_icews18.txt --dir_of_entities2id data/processed_new/icews18/entity2id.json --path_save data/processed_new/icews18/ragtkgc/train/history_modeling_train
 ```
+
+You may do it for other splits too (test and valid), especially "test" as it will be needed for testing Just write their name instead of "train" in the provided example.
+
 Create JSON train parameters:
 - **--dir_of_trainset**, the path to the training set directory.
 - **--dir_of_answers**, the path to the answers directory.
