@@ -43,4 +43,22 @@ Output is saved at:
 
 By default, {rule_learning_algorithm} is set to "ragtkgc", and needs to be manually changed in the RAGTKGC/data_utils/retrieve.py file, line 27, to another rule_learning_algorithm name.
 
-For icews18, you have to manually create the all_facts.txt file, because it is too large to load it on the hub. Please go to  RAGTKGC/data/processed_new/icews18 and just create a new .txt by concatenating train + valid + test, in this order.
+**For icews18, you have to manually create the all_facts.txt file, because it is too large to load it on the hub. Please go to  RAGTKGC/data/processed_new/icews18 and just create a new .txt by concatenating train + valid + test, in this order.**
+
+### Training files
+For training, you need to convert history_facts files into json file:
+```
+python ./data_utils/create_json_train.py --dir_of_trainset 'the_full_trainset_to_convert (see [A])' --dir_of_answers 'the_test_answers (see [B])' --dir_of_entities2id 'the_json_of_entities2id' --path_save 'recommend_the_same_split_folder_as_the_one_converted'
+```
+Position on the RAGTKGC root folder. An example for icews18 train split would be like:
+```
+python data_utils/create_json_train.py --dir_of_trainset data/processed_new/icews18/ragtkgc/train/history_facts/history_facts_icews18.txt --dir_of_answers  data/processed_new/icews18/ragtkgc/train/test_answers/test_answers_icews18.txt --dir_of_entities2id data/processed_new/icews18/entity2id.json --path_save data/processed_new/icews18/ragtkgc/train/history_modeling_train
+```
+Create JSON train parameters:
+- **--dir_of_trainset**, the path to the training set directory.
+- **--dir_of_answers**, the path to the answers directory.
+- **--dir_of_entities2id**, the path to the entities2id file.
+- **--path_save**, where to save the results.
+- **--nums_sample**, how many samples to convert for training; default: 16 (and the whole set). For example, you can write '16,32,128' if you want files with those amounts of trainins samples, besides the whole set.
+- **--name_train**, the name of the output file; default: "icews18".
+- 
