@@ -16,7 +16,7 @@ parser.add_argument("--num_walks", "-n", default="200", type=int)
 parser.add_argument("--transition_distr", default="exp", type=str)
 parser.add_argument("--num_processes", "-p", default=1, type=int)
 parser.add_argument("--seed", "-s", default=None, type=int)
-parser.add_argument("--mining", "-m", default="gtkg", type=str)
+parser.add_argument("--mining", "-m", default="ragtkgc", type=str)
 parsed = vars(parser.parse_args())
 
 dataset = parsed["dataset"]
