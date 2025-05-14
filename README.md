@@ -3,6 +3,8 @@ This is the official implementation of the paper **RAGTKGC: Undertaking Temporal
 
 ## History Modeling
 
+Code based on https://github.com/mayhugotong/GenTKG. Many thanks for their great contribution!
+
 In the paper, we test four ways of modeling the history:
 1. raw, where no history is retrieved
 2. standard, where we select quads that contain the same subject as the target one (see https://github.com/usc-isi-i2/isi-tkg-icl for more details)
@@ -80,5 +82,27 @@ Create JSON train parameters:
 
 The other parts of the framework run using command lines, however this part is provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
 For LLaMA2-7B, we have used A100 GPU setting, while for Flan-T5-Small we opted for T4 GPU.
+Model's checkpoints are automatically saved at "./models". However, you need to rename the final checkpoint as desired. We recommend naming it as "name_of_base_model_dataset_history_modeling_algorithm". An example would be "Llama-2-7B-icews18-ragtkgc". You can delete the other checkpoints if not needed.
 
 ## Testing models
+
+Code based on https://github.com/usc-isi-i2/isi-tkg-icl. Many thanks for their great contribution!
+
+To test any model, you need to run from RAGTKGC folder:
+```
+python run_hf.py --base_model "the base model" --finetuned_model "fine tuned version of base model" --dataset "dataset name" --dataset_path "path to test file"
+```
+
+An example for testing a LLaMA2-7B-ragtkgc LORA version on icews18 dataset:
+```
+python run_hf.py --base_model "TheBloke/Llama-2-7B-fp16" --finetuned_model "Llama-2-7B-icews18-ragtkgc" --dataset "icews18" --dataset_path "ragtkgc/test/10000/history_modeling_test/icews18_test.json"
+```
+
+Parameters:
+- **--base_model**, the name of the base model, as it is on HuggingFace or folder name if saved locally; default: "google/flan-t5-small".
+- **--finetuned_model**, name of the folder (or HuggingFace) which holds the fine tuned model version or peft adapter.
+- **--dataset**, the name of the dataset; default: "icews18", other choice is "icews14".
+- **--dataset_path**, the path to the test dataset; by default, it starts from "./data/processed_new/{args.dataset}/".
+- **--dataset_rag_path**, the path to the rag test dataset; by default, it starts from "./data/processed_new/{args.dataset}/".
+
+Results are saved in "./results/{dataset_name}/", with the name of "{finetuned_model}_{test_|rag|_dataset}.jsonl"
