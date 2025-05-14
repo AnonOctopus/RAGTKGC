@@ -1,13 +1,9 @@
 import argparse
 from dataclasses import dataclass
 import json
-import os
-import random
-from typing import Any, Dict, List, Optional
 from collections import Counter
 from math import sqrt
-import numpy as np
-from numpy import False_
+from evaluate import load
 
 MAX_HITS = 10
 
@@ -32,7 +28,7 @@ class HitsMetric:
     hit10p: int = 0
 
     cosine_sim: float = 0.0
-
+    bertscore: float = 0.0
 
     def update(self, rank):
         if rank <= 1:
@@ -54,6 +50,8 @@ class HitsMetric:
     def update3(self, cs):
       self.cosine_sim += cs
 
+    def update4(self, bertscore):
+        self.bertscore += bertscore
 
     def dump(self):
         return {
@@ -65,7 +63,8 @@ class HitsMetric:
             #"hit1p": self.hit1p / self.total2,
             #"hit3p": self.hit3p / self.total2,
             #"hit10p": self.hit10p / self.total2,
-            "cs": self.cosine_sim / self.total
+            "cs": self.cosine_sim / self.total,
+            "bertscore": self.bertscore / self.total
         }
 
 
@@ -80,7 +79,7 @@ def get_args():
         type=str,
     )
     parser.add_argument("--dataset_path", default="ragtkgc/test/10000/history_modeling_test/icews18_test.json", type=str) # path to the test set
-    parser.add_argument("--dataset_rag_path", default="test_rag/icews18_gpt_rule_miner.json", type=str) # path to the rag test set
+    parser.add_argument("--dataset_rag_path", default="test_rag/icews18_gpt_given_rules.json", type=str) # path to the rag test set
     parser.add_argument("--verbose", default=False, action="store_true")  # print extra information
 
     args = parser.parse_args()
@@ -134,6 +133,13 @@ def update_metric(example, metric, args):
     if args.verbose:
         print(f'predictions: {example["predictions"]}')
 
+    def bertscore(target, prediction):
+        
+        bertscore = load("bertscore")
+        results = bertscore.compute(predictions=[prediction], references=[target], lang="en")
+        
+        return results['f1']
+
     for target in example["targets"]:
         
         metric.total += 1
@@ -148,6 +154,10 @@ def update_metric(example, metric, args):
     
         cs = cosine_similarity(target, example['predictions'][0])
         metric.update3(cs)
+
+        bs = bertscore(target, example['predictions'][0])
+        metric.update4(bs)
+
 
         # standard and reported approach for calculating metrics
         # verify if the target is among the predictions, and if yes which is its rank
