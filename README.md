@@ -1,5 +1,16 @@
 # RAGTKGC
-This is the official implementation of the paper Undertaking Temporal Knowledge Graph Completion with Language Models.
+This is the official implementation of the paper **RAGTKGC: Undertaking Temporal Knowledge Graph Completion with Retrieval Augmented Generation**
+
+## History Modeling
+
+In the paper, we test four ways of modeling the history:
+1. raw, where no history is retrieved
+2. standard, where we select quads that contain the same subject as the target one (see https://github.com/usc-isi-i2/isi-tkg-icl for more details)
+3. gtkg, where history is retrieved using the standard method + temporal logical rules that were mined from the given TKG (train split) (https://github.com/mayhugotong/GenTKG)
+4. ragtkgc, our approach which modifies gtkg by considering all possible paths (i.e. combination of edges) between the subject and object for any fixed relationship during rules mining.
+
+For 1 and 2, the datasets are already provided and is no need to generate them again (they will always result in the same input prompts).
+For 3 and 4, we also provide the datasets that we have used for experiments. Additionally, you can also generate your own versions by following the instructions from below.
 
 ### Rules learning
 It works with files from RAGTKGC/data/processed_new/ . 
@@ -65,3 +76,8 @@ Create JSON train parameters:
 - **--nums_sample**, how many samples to convert for training; default: 16 (and the whole set). For example, you can write '16,32,128' if you want files with those amounts of trainins samples, besides the whole set.
 - **--name_train**, the name of the output file; default: "icews18".
 
+## Fine tuning models
+
+The other parts of the framework run using command lines, however this part is provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
+
+## Testing models
