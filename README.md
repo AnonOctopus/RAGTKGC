@@ -79,5 +79,6 @@ Create JSON train parameters:
 ## Fine tuning models
 
 The other parts of the framework run using command lines, however this part is provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
+For LLaMA2-7B, we have used A100 GPU setting, while for Flan-T5-Small we opted for T4 GPU.
 
 ## Testing models
