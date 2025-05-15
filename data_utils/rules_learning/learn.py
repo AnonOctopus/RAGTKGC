@@ -34,7 +34,7 @@ temporal_walk = Temporal_Walk(data.train_idx, data.inv_relation_id, transition_d
 rl = Rule_Learner(temporal_walk.edges, data.id2relation, data.inv_relation_id, dataset)
 all_relations = sorted(temporal_walk.edges)  # Learn for all relations  
 if mining_alg in ['ragtkgc','ragtkgc_no_walks']:
-    unique_quads = get_unique_quads_per_rels()
+    unique_quads = get_unique_quads_per_rels(dataset, f'../../data/original/{dataset}/train.txt')
     unique_quads = dict(sorted(unique_quads.items(), key=lambda item: item[0], reverse = False))
 
 #print(temporal_walk.edges[160])

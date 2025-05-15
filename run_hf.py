@@ -76,20 +76,20 @@ if __name__ == "__main__":
       indexes = eval(f.readline())
       f.close()
 
-      filename = get_filename(args.dataset, dataset_name =  args.dataset_rag_path, model_name = args.finetuned_model)
+      filename = get_filename(args.dataset, dataset_path =  args.dataset_rag_path, model_name = args.finetuned_model)
     
     else:
 
-      filename = get_filename(args.dataset, dataset_name = args.dataset_path, model_name = args.finetuned_model)
+      filename = get_filename(args.dataset, dataset_path = args.dataset_path, model_name = args.finetuned_model)
 
-    with torch.no_grad(), open(filename, "w", encoding="utf-8") as writer, tqdm(test_set) as pbar, test_set_rag as rag:
+    with torch.no_grad(), open(filename, "w", encoding="utf-8") as writer, tqdm(test_set) as pbar:
 
       for i, x in enumerate(pbar):
           
           if test_set_rag:
             if i in indexes: # select the version of the prompt with extra info from rag, if in indexes
               j = indexes.index(i)
-              x = rag[j]
+              x = test_set_rag[j]
               
 
           model_input = x['context']
@@ -100,7 +100,7 @@ if __name__ == "__main__":
             
           # depending on the input prompt, the selection might need extra steps
 
-          if i in indexes and test_set_rag:
+          if test_set_rag and i in indexes:
             time = text.split(":")[1].strip()
             triple = text.split(":")[2].strip()
           else:

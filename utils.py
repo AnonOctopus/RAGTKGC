@@ -79,7 +79,7 @@ def get_args():
         type=str,
     )
     parser.add_argument("--dataset_path", default="ragtkgc/test/10000/history_modeling_test/icews18_test.json", type=str) # path to the test set
-    parser.add_argument("--dataset_rag_path", default="test_rag/icews18_gpt_given_rules.json", type=str) # path to the rag test set
+    parser.add_argument("--dataset_rag_path", type=str) # path to the rag test set
     parser.add_argument("--verbose", default=False, action="store_true")  # print extra information
 
     args = parser.parse_args()
@@ -90,10 +90,10 @@ def get_filename(dataset, dataset_path = '', model_name = '',):
     filename_args = "_".join(
         [
             model_name,
-            dataset_path.split('/')[-1],
+            dataset_path.split('/')[-1].split('.')[0],
         ]
     )
-    filename = f"results/{dataset}/{filename_args}.jsonl"
+    filename = f"./results/{dataset}/{filename_args}.jsonl"
     print(f"output file: {filename}")
     return filename
 
@@ -155,8 +155,8 @@ def update_metric(example, metric, args):
         cs = cosine_similarity(target, example['predictions'][0])
         metric.update3(cs)
 
-        bs = bertscore(target, example['predictions'][0])
-        metric.update4(bs)
+        #bs = bertscore(target, example['predictions'][0])
+        #metric.update4(bs[0])
 
 
         # standard and reported approach for calculating metrics

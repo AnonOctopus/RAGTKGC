@@ -10,6 +10,7 @@ def parser():
     parser.add_argument("--retrieve_type", "-t", default="TLogic-3", type=str)
     parser.add_argument("--name_of_rules_file", "-r", default="", type=str)
     parser.add_argument("--rule_length_all","-l", default = True, type=bool)
+    parser.add_argument("--mining","-m", default = 'ragtkgc', type=str)
     parsed = vars(parser.parse_args())
     return parsed
     
@@ -20,11 +21,11 @@ if __name__ == "__main__":
     name_rules = parsed["name_of_rules_file"]
     rule_length_all = parsed["rule_length_all"]
     
-    path_workspace = "../data/original/"+type_dataset 
+    path_workspace = "../data/original/"+type_dataset + '/'
     path_out_tl = "../data/processed_new/"+type_dataset+"/output/"+type_dataset+"/"
     print(path_out_tl)
     
-    path_save = "../data/processed_new/"+type_dataset+"/ragtkgc/"
+    path_save = "../data/processed_new/"+type_dataset+ f"/{parsed.mining}/"
     if not os.path.exists(path_save):
             os.makedirs(path_save)
         

@@ -8,7 +8,7 @@ from tqdm import tqdm
 import numpy as np
 
 
-def get_rels_per_node(path_file = '../../data/original/icews14/train.txt'):
+def get_rels_per_node(path_file):
     
     f = open(path_file, encoding = 'utf8')
     lines = f.readlines()
@@ -55,7 +55,7 @@ def get_unique_quads(path):
 
     return dict(sorted(nodes_rels.items(), key=lambda item: item[1], reverse = False))
 
-def get_unique_quads_per_rels(path = '../../data/original/icews14/train.txt', period = 24):
+def get_unique_quads_per_rels(dataset, path, period = 24):
 
     def add_quad(quad, quads_all, quads, unique_nodes):
 
@@ -87,8 +87,8 @@ def get_unique_quads_per_rels(path = '../../data/original/icews14/train.txt', pe
     unique_nodes = get_unique_quads(path)
     #print(unique_nodes)
     f = open(path, encoding = 'utf8')
-    rel2id_file = open('../../data/original/icews14_ici/relation2id.json', encoding = 'utf8')
-    output = open('../../data/processed_new/icews14/node_labelling_stats_icews14.txt', 'w')
+    rel2id_file = open(f'../../data/original/{dataset}/relation2id.json', encoding = 'utf8')
+    output = open(f'../../data/processed_new/{dataset}/node_labelling_stats_{dataset}.txt', 'w')
 
     id2rel = dict([(v, k) for k, v in json.load(rel2id_file).items()])
     lines = f.readlines()
