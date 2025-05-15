@@ -3,6 +3,20 @@ This is the official implementation of the paper **RAGTKGC: Undertaking Temporal
 
 **Important Note! The code is written to run locally. However, the fine tuning part is provided as a Jupyter Notebook, so you can move it on Google Colab if you don't have enough resources. Any part that is moved on Colab requires you to change the paths by hand, as Google Colab starts looking for files from /Content/...**
 
+## Create a Conda Env
+
+We advise you to create a new environment for our code, but you can also run it on already existing ones or Colab, just make sure to install requirements and torch as provided below:
+```
+git clone https://github.com/AnonOctopus/RAGTKGC
+cd RAGTKGC
+
+conda create -n ragtkgc python=3.9.21
+conda activate ragtkgc
+
+pip install -r requirements.txt 
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
 ## History Modeling
 
 Code based on https://github.com/mayhugotong/GenTKG. Many thanks for their great contribution!
