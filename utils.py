@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import json
 from collections import Counter
 from math import sqrt
-from evaluate import load
 
 MAX_HITS = 10
 
@@ -28,7 +27,6 @@ class HitsMetric:
     hit10p: int = 0
 
     cosine_sim: float = 0.0
-    bertscore: float = 0.0
 
     def update(self, rank):
         if rank <= 1:
@@ -50,9 +48,6 @@ class HitsMetric:
     def update3(self, cs):
       self.cosine_sim += cs
 
-    def update4(self, bertscore):
-        self.bertscore += bertscore
-
     def dump(self):
         return {
             "t": self.total,
@@ -64,7 +59,6 @@ class HitsMetric:
             #"hit3p": self.hit3p / self.total2,
             #"hit10p": self.hit10p / self.total2,
             "cs": self.cosine_sim / self.total,
-            "bertscore": self.bertscore / self.total
         }
 
 
@@ -133,12 +127,7 @@ def update_metric(example, metric, args):
     if args.verbose:
         print(f'predictions: {example["predictions"]}')
 
-    def bertscore(target, prediction):
-        
-        bertscore = load("bertscore")
-        results = bertscore.compute(predictions=[prediction], references=[target], lang="en")
-        
-        return results['f1']
+
 
     for target in example["targets"]:
         
@@ -155,8 +144,7 @@ def update_metric(example, metric, args):
         cs = cosine_similarity(target, example['predictions'][0])
         metric.update3(cs)
 
-        #bs = bertscore(target, example['predictions'][0])
-        #metric.update4(bs[0])
+
 
 
         # standard and reported approach for calculating metrics

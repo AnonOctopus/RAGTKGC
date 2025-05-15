@@ -103,3 +103,19 @@ Parameters:
 - **--dataset_rag_path**, the path to the rag test dataset; by default, it starts from "./data/processed_new/{args.dataset}/".
 
 Results are saved in "./results/{dataset_name}/", with the name of "{finetuned_model}_{test_|rag|_dataset}.jsonl"
+
+### Calculating BERTScore
+
+BERTScore is calculated using a PLM, such as roberta-large. Thus, if calculated after each prediction as the other metrics, it would require a lot of extra time. We provide a way of determining it afterwards, based on the results file.
+
+It can be run using the following command:
+```
+!python bertscore.py --results_file "name_of_results_file"
+```
+An example can be:
+```
+python bertscore.py --results_file "llama-2-7B-icews18-ragtkgc_icews18_test.jsonl"
+```
+
+Parameters:
+- ***--rf** **--results_file**, the name of the results file; by default, it looks in the results folder.
