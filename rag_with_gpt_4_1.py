@@ -7,27 +7,39 @@ from tqdm import tqdm
 from sentence_transformers import util
 from sentence_transformers import SentenceTransformer
 
-ff = ['results7.jsonl','results8.jsonl','results9.jsonl','results10.jsonl', 'results11.jsonl', 'results12.jsonl']
-metrics = {}
 
-for f in ff:
-    with open(f'./{f}', 'r', encoding='utf-8') as results:
-        lines = results.readlines()
-        for i, line in enumerate(lines):
-            
-            d = eval(line)
-            pred = d['predictions']
-            if d['targets'][0] not in pred[0]:
-                acc += 1
-                if i not in metrics.keys():
-                    metrics[i] = [1]
-                else:
-                    metrics[i][0] += 1
-            count += 1
 
-sorted_d = dict(sorted(metrics.items(),  key= lambda item: item[1][0], reverse = True))
+# read all results file and count for each test sample how many times it was wrongly predicted
+# we save everything in a dictionary where the key is the index of the sample, 
+# while the value is a list, where the first element is the count of wrong predictions
 
-#print(groups)
+def get_wrong_predictions_count():
+    ff = ['results7.jsonl','results8.jsonl','results9.jsonl','results10.jsonl', 'results11.jsonl', 'results12.jsonl']
+    metrics = {}
+
+
+
+
+    for f in ff:
+        with open(f'./{f}', 'r', encoding='utf-8') as results:
+            lines = results.readlines()
+            for i, line in enumerate(lines):
+                
+                d = eval(line)
+                pred = d['predictions']
+                if d['targets'][0] not in pred[0]:
+                    acc += 1
+                    if i not in metrics.keys():
+                        metrics[i] = [1]
+                    else:
+                        metrics[i][0] += 1
+                count += 1
+
+    # sort them in descending order, starting from those test samples with lowest prediction power
+    sorted_d = dict(sorted(metrics.items(),  key= lambda item: item[1][0], reverse = True))
+
+    return sorted_d
+
 fff = ['../data/processed_new_ici/icews18/splits_rl_1/uw-text/test/10000/lora_test/icews18_uw_test.json']
        #,'../data/processed_new_ici/icews14/splits_rl_1/u-text/test/lora_test/icews14_test.json']
 
@@ -51,34 +63,31 @@ for fl in fff:
                 sorted_d[i].append(input)
                 sorted_d[i].append(prompt)
                 sorted_d[i].append(line['target'])
-                
-                
 
+# group together test samples based on the count of wrong predictions 
 groups = []
 i_d = {}
-i_v = 999
+i_v = 999 # dummy value to know when a group of test samples was processed and another one starts
+
 for i,(k, v) in enumerate(sorted_d.items()):
     
-    if v[0] != i_v:
+    if v[0] != i_v: # if true, then we have a new group to process
         
         i_v = v[0]
         if i_d:
-            print(len(i_d))
-            groups.append(i_d)
-        i_d = {k:v}
-    else:
+            #print(len(i_d))
+            groups.append(i_d) # save the already existing group
+        i_d = {k:v} # start the new group
+
+    else: # if false, continue adding the test samples to the group
         i_d[k] = v
     
-    if i == len(sorted_d) - 1:
-        print(len(i_d))
+    if i == len(sorted_d) - 1: # save the last group too
+        #print(len(i_d))
         groups.append(i_d)
-
-#print(groups)
 
 for d in groups:
     val = list(d.values())
-    #print(val)
-    #print(np.average(val[:][1]))
 
 def read_json(json_dir):
     with open(json_dir, "r", encoding="utf-8") as f:

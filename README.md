@@ -114,8 +114,8 @@ It can be run using the following command:
 ```
 An example can be:
 ```
-python bertscore.py --results_file "llama-2-7B-icews18-ragtkgc_icews18_test.jsonl"
+python bertscore.py --results_file "icews18/llama-2-7B-icews18-ragtkgc_icews18_test.jsonl"
 ```
 
 Parameters:
-- ***--rf** **--results_file**, the name of the results file; by default, it looks in the results folder.
+- ***--rf** **--results_file**, the path of the results file; by default, it looks in the results folder.
