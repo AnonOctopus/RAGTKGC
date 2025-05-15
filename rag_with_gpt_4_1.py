@@ -1,3 +1,4 @@
+import argparse
 import json
 import numpy as np
 from openai import OpenAI
@@ -8,86 +9,108 @@ from sentence_transformers import util
 from sentence_transformers import SentenceTransformer
 
 
+def parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default='icews18', type=str)
+    parser.add_argument("--rule_file", default='050525174831_r[1]_n200_exp_s1_rules.txt', type=str)
+    parser.add_argument("--conf_treshold", default=0.5, type=float)
+    parser.add_argument("--rag_version", choices=['gpt-given-rules','gpt-given-relations','gpt-rule-miner'], default='gpt-given-rules', type=str)
+    parser.add_argument("--use_llm_similarity", default= False, type=bool)
+    parser.add_argument("--no_similarity", default= False, type=bool)
 
+    args = parser.parse_args()
+    return args
+    
 # read all results file and count for each test sample how many times it was wrongly predicted
 # we save everything in a dictionary where the key is the index of the sample, 
 # while the value is a list, where the first element is the count of wrong predictions
 
-def get_wrong_predictions_count():
-    ff = ['results7.jsonl','results8.jsonl','results9.jsonl','results10.jsonl', 'results11.jsonl', 'results12.jsonl']
+def get_wrong_predictions_count(args):
+
+    ff = [f'flan-t5-small-{args.dataset}-raw_{args.dataset}_raw_test',f'flan-t5-small-{args.dataset}-standard_{args.dataset}_standard_test', f'flan-t5-small-{args.dataset}-gtkg_{args.dataset}_gtkg_test', f'flan-t5-small-{args.dataset}-ragtkgc_{args.dataset}_ragtkgc_test',f'llama-2-7B-{args.dataset}-raw_{args.dataset}_raw_test', f'llama-2-7B-{args.dataset}-standard_{args.dataset}_standard_test',f'llama-2-7B-{args.dataset}-gtkg_{args.dataset}_gtkg_test',f'llama-2-7B-{args.dataset}-ragtkgc_{args.dataset}_ragtkgc_test']
+    
+    len_ff = len(ff)
     metrics = {}
 
-
-
-
     for f in ff:
-        with open(f'./{f}', 'r', encoding='utf-8') as results:
+        with open(f'./results/{args.dataset}/{f}.jsonl', 'r', encoding='utf-8') as results:
             lines = results.readlines()
             for i, line in enumerate(lines):
                 
                 d = eval(line)
                 pred = d['predictions']
                 if d['targets'][0] not in pred[0]:
-                    acc += 1
+
                     if i not in metrics.keys():
                         metrics[i] = [1]
                     else:
                         metrics[i][0] += 1
-                count += 1
 
     # sort them in descending order, starting from those test samples with lowest prediction power
     sorted_d = dict(sorted(metrics.items(),  key= lambda item: item[1][0], reverse = True))
 
-    return sorted_d
+    return sorted_d, len_ff
 
-fff = ['../data/processed_new_ici/icews18/splits_rl_1/uw-text/test/10000/lora_test/icews18_uw_test.json']
-       #,'../data/processed_new_ici/icews14/splits_rl_1/u-text/test/lora_test/icews14_test.json']
+# we need to extract sample information such as target quad and associated history in order to generate additional data later with GPT 4.1
 
-for fl in fff:
+def get_sample_info(args):
 
-    with open(fl, 'r', encoding='utf-8') as test:
+    sorted_d, len_ff = get_wrong_predictions_count(args)
+    
+    # because the ragtkgc history modeling was the most efficient one, we build the new rag test prompts with this histories to which we'll append the ones obtained with rag
+    fff = [f'./data/processed_new/{args.dataset}/ragtkgc/test/10000/history_modeling_test/{args.dataset}_ragtkgc_test.json' if args.dataset == 'icews18' else f'./data/processed_new/{args.dataset}/ragtkgc/test/history_modeling_test/{args.dataset}_ragtkgc_test.json']
 
-        lines = json.load(test)
+    for fl in fff:
 
-        for i,line in enumerate(lines):
-            
-            if i in sorted_d.keys():
+        with open(fl, 'r', encoding='utf-8') as test:
+
+            lines = json.load(test)
+
+            for i,line in enumerate(lines):
                 
-                quads = line['context'].split('\n')
-                prompt = ''
-                for quad in quads[:-1]:
-                    prompt += f'{quad}\n'
-                input = quads[-1]
-                count = line['context'].count('[')
-                sorted_d[i].append(count)
-                sorted_d[i].append(input)
-                sorted_d[i].append(prompt)
-                sorted_d[i].append(line['target'])
-
-# group together test samples based on the count of wrong predictions 
-groups = []
-i_d = {}
-i_v = 999 # dummy value to know when a group of test samples was processed and another one starts
-
-for i,(k, v) in enumerate(sorted_d.items()):
+                if i in sorted_d.keys():
+                    
+                    quads = line['context'].split('\n')
+                    prompt = ''
+                    for quad in quads[:-1]:
+                        prompt += f'{quad}\n'
+                    input = quads[-1]
+                    count = line['context'].count('[')
+                    sorted_d[i].append(count) # add how many quads are in ith sample associated history
+                    sorted_d[i].append(input) # target (incomplete) quad
+                    sorted_d[i].append(prompt) # associated history
+                    sorted_d[i].append(line['target']) # target value
     
-    if v[0] != i_v: # if true, then we have a new group to process
+    return sorted_d, len_ff
+
+def group_predictions(args):
+    
+    sorted_d, len_ff = get_sample_info(args)
+
+    # group together test samples based on the count of wrong predictions 
+    groups = []
+    i_d = {}
+    i_v = 999 # dummy value to know when a group of test samples was processed and another one starts
+
+    for i,(k, v) in enumerate(sorted_d.items()):
         
-        i_v = v[0]
-        if i_d:
+        if v[0] != i_v: # if true, then we have a new group to process
+            
+            i_v = v[0]
+            if i_d:
+                #print(len(i_d))
+                groups.append(i_d) # save the already existing group
+            i_d = {k:v} # start the new group
+
+        else: # if false, continue adding the test samples to the group
+            i_d[k] = v
+        
+        if i == len(sorted_d) - 1: # save the last group too
             #print(len(i_d))
-            groups.append(i_d) # save the already existing group
-        i_d = {k:v} # start the new group
+            groups.append(i_d)
 
-    else: # if false, continue adding the test samples to the group
-        i_d[k] = v
-    
-    if i == len(sorted_d) - 1: # save the last group too
-        #print(len(i_d))
-        groups.append(i_d)
 
-for d in groups:
-    val = list(d.values())
+    return groups, len_ff, sorted_d
 
 def read_json(json_dir):
     with open(json_dir, "r", encoding="utf-8") as f:
@@ -97,25 +120,27 @@ def read_json(json_dir):
 def flip_dict(original_dict):
     return {v: k for k, v in original_dict.items()}
 
-def get_rules(file, conf_treshold = 0.5):
+# retrieves all rules with a confidence greater or equal with a given treshold
+
+def get_rules(args):
 
     final_rules = {}
 
-    with open(f'../data/processed_new_ici/icews18/output/icews18/{file}', 'r', encoding='utf-8') as rules:
+    with open(f'./data/processed_new/{args.dataset}/output/{args.dataset}/{args.rule_file}', 'r', encoding='utf-8') as rules:
 
         lines = rules.readlines()
        
         for line in lines: 
             
             s_line = line.split(' ')
-            #print(s_line)
+
             s_line = [x for x in s_line if x]
-            #print(s_line)
+  
             conf = s_line[0]
             rule = s_line[3] + s_line[4] + s_line[5].replace('\n','')
-            #print(conf, rule)
+  
             
-            if float(conf) >= conf_treshold:
+            if float(conf) >= args.conf_treshold:
                 
                 rel = rule.split('X0')[0][:-1]
                 
@@ -127,11 +152,12 @@ def get_rules(file, conf_treshold = 0.5):
             
     return final_rules
 
-def get_prompt(input_text, withRules = True, withRels = True):
+# create the prompt for each test sample that will retrieve extra information
 
-    #entities = read_json('../data/processed_new_ici/icews14/entity2id.json') 
-    rels = read_json('../data/processed_new_ici/icews18/relation2id.json') 
-    timestamps = read_json('../data/processed_new_ici/icews18/ts2id.json')
+def get_prompt(input_text, args, withRules = True, withRels = True):
+
+    rels = read_json(f'./data/processed_new/{args.dataset}/relation2id.json') 
+    timestamps = read_json(f'./data/processed_new/{args.dataset}/ts2id.json')
     timestamps = flip_dict(timestamps)
 
     quad = input_text.split(' ')
@@ -142,7 +168,7 @@ def get_prompt(input_text, withRules = True, withRels = True):
 
     #print(final_quad)
     if withRules:
-        dd_rules = get_rules('050525174831_r[1]_n200_exp_s1_rules.txt')
+        dd_rules = get_rules(args)
         if rel in dd_rules.keys():
             d_rules = dd_rules[rel]
         else:
@@ -189,6 +215,7 @@ def get_prompt(input_text, withRules = True, withRels = True):
             '''
         #    List of entities: {list(entities.keys())} Be sure to exactly use words as they were given in the list. You will receive a list of entities
 
+# calculate cosine similarity using classical approach
 def cosine_similarity(target, object):
 
     vec1 = Counter(target)
@@ -198,6 +225,7 @@ def cosine_similarity(target, object):
     magnitude2 = sqrt(sum(count ** 2 for count in vec2.values()))
     return dot_product / (magnitude1 * magnitude2) if magnitude1 != 0 and magnitude2 != 0 else 0
 
+# calculate cosine similarity using llms
 def cosine_similarity_llm(target, object, model):
 
     
@@ -208,12 +236,14 @@ def cosine_similarity_llm(target, object, model):
     #print("done")
     return util.pytorch_cos_sim(prediction_embeddings, embeddings)[0]
 
-def get_gpt_response(prompt, user, model, useLLM = False):
+def get_gpt_response(args, prompt, user, model, useLLM = False):
 
-    client = OpenAI(api_key = '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') # load YOUR OWN KEY; here stored as a secret in the google colab
-        
-    req_headers = ['openai-model', 'openai-processing-ms', 'x-ratelimit-remaining-requests', 'x-ratelimit-remaining-tokens', 'x-ratelimit-reset-requests']
+    api_key = ''
 
+    with open('api_key.txt', 'r') as ak:
+        api_key = ak.readline()
+
+    client = OpenAI(api_key = api_key) # load YOUR OWN KEY
 
     try:
         completion = client.chat.completions.with_raw_response.create(
@@ -230,9 +260,9 @@ def get_gpt_response(prompt, user, model, useLLM = False):
     
     #print(gpt_response)
 
-    entities = read_json('../data/processed_new_ici/icews18/entity2id.json') 
-    rels = read_json('../data/processed_new_ici/icews18/relation2id.json') 
-    timestamps = read_json('../data/processed_new_ici/icews18/ts2id.json')
+    rels = read_json(f'./data/processed_new/{args.dataset}/relation2id.json') 
+    timestamps = read_json(f'./data/processed_new/{args.dataset}/ts2id.json')
+    entities = read_json(f'./data/processed_new/{args.dataset}/entity2id.json') 
 
     quads = resp.splitlines() if resp.strip() != "None" else []
     history = ''
@@ -275,9 +305,11 @@ def get_gpt_response(prompt, user, model, useLLM = False):
         except:
             continue
         
-        if year <= 2018:
+        target_year = 2014 if args.dataset == 'icews14' else 2018
+
+        if year <= target_year:
             #print(year)
-            if year == 2018: 
+            if year == target_year: 
               if time in timestamps.keys():
                 time = timestamps[time]/24
               else: 
@@ -358,49 +390,97 @@ def get_gpt_response(prompt, user, model, useLLM = False):
         #print(history)
     return history, history2, history3
 
-#prompt, user = get_prompt(groups[0])
 
-prompts = []
-prompts2 = []
-prompts3 = []
+if __name__ == "__main__":
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
+    args = parser()
 
-for i, (k,v) in tqdm(enumerate(groups[0].items())):
+    groups, nr_of_results_files, sorted_d = group_predictions(args)
+
+    total_length = 0
+
+    for g in groups:
+        print(f'There are {len(g.items())} samples where they were wrongly predicted {list(g.values())[0][0]}/{nr_of_results_files} times.')
+        total_length += len(g.items())
     
-    prompt, user = get_prompt(v[2], False, False) # True/False pt reguli, False/True pt rel, False/False pt nimic
-    #print(prompt, user)
-    history, history2, history3 = get_gpt_response(prompt, user, model, False) 
-    #print(history, history2, history3)
-    to_write = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history}Input quadruple: {v[2]}",
-                                        "target" : f"{v[4]}"
-                                        }
-    #to_write2 = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history2}Input quadruple: {v[2]}",
-    #                                    "target" : f"{v[4]}"
-    #                                    }
-    to_write3 = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history3}Input quadruple: {v[2]}",
-                                        "target" : f"{v[4]}"}
-      
-    with open('icews18_test_free_cs_4000_temp.json', 'a', encoding='utf8') as jsontext:
-        jsontext.write(f"{json.dumps(to_write)},")
+    # we continue taking from the next group if one is less than the requested number
+    nr_of_samples = input(f'How many samples do you want to extend with RAGTKGC with GPT 4.1? (can be max dataset length = {total_length}): ')
+    try:
+        nr_of_samples = int(nr_of_samples)
+    except:
+        print("Please input an integer number")
 
-    #with open('lora_test_gpt_5_csllm_temp.json', 'a', encoding='utf8') as jsontext:
-    #    jsontext.write(f"{json.dumps(to_write2)},")
+    if nr_of_samples > total_length:
+        print('The number of samples is beyond the length of the dataset. Choose a smaller number.')
+    
+    else:
 
-    with open('icews18_test_free_nocs_4000_temp.json', 'a', encoding='utf8') as jsontext:
-        jsontext.write(f"{json.dumps(to_write3)},")
 
-    prompts.append(to_write)
-    #prompts2.append(to_write2)
-    prompts3.append(to_write3)
-                                        
-    if i == 3999: break
-    #break
-with open('icews18_test_free_cs_4000.json', 'w', encoding='utf8') as jsontext:
-    json.dump(prompts, jsontext)
-#with open('lora_test_gpt_5_csllm.json', 'w', encoding='utf8') as jsontext:
-#    json.dump(prompts2, jsontext)
-with open('icews18_test_free_nocs_4000.json', 'w', encoding='utf8') as jsontext:
-    json.dump(prompts3, jsontext)
+        prompts = []
+        prompts2 = []
+        prompts3 = []
 
-#print(list(groups[0].keys())[:4000])
+        
+
+        for i, (k,v) in tqdm(enumerate(sorted_d.items())):
+            
+            #./data/processed_mew/{args.dataset}/test_rag/
+            file_name = f'{args.dataset}_{args.rag_version}'
+
+            if args.rag_version == 'gpt-given-rules':
+
+                prompt, user = get_prompt(v[2], args, True, False)
+
+            elif args.rag_version == 'gpt-given-relations':
+
+                prompt, user = get_prompt(v[2], args, False, True)
+
+            elif args.rag_version == 'gpt-rule-miner':
+
+                prompt, user = get_prompt(v[2], args, False, False)
+            
+
+            if args.use_llm_similarity: model = SentenceTransformer('all-MiniLM-L6-v2')
+            else: model = False
+
+            # first is using cosine similarity, second is using LLM similarity (if set to False, it returns the same as history3), and third leaves the entities/relationships untouched, as output by gpt 4.1
+            history, history2, history3 = get_gpt_response(args, prompt, user, model, args.use_llm_similarity) 
+            
+            # first we save everything in a temporary file, in case any error stops the process; if True, restart the process but ignore the first i already done ones
+            to_write = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history}Input quadruple: {v[2]}",
+                                                "target" : f"{v[4]}"}
+            with open(f'{file_name}_temp.json', 'a', encoding='utf8') as jsontext:
+                jsontext.write(f"{json.dumps(to_write)},")
+            prompts.append(to_write)
+
+            if args.use_llm_similarity:
+                to_write2 = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history2}Input quadruple: {v[2]}",
+                                                    "target" : f"{v[4]}"}
+                with open(f'{file_name}_llm_sim_temp.json', 'a', encoding='utf8') as jsontext:
+                    jsontext.write(f"{json.dumps(to_write2)},")
+                prompts2.append(to_write2)
+
+            if args.no_similarity:
+                to_write3 = {"context" : f"{v[3]}The above set of quadruples are factually correct. Firstly try to formulate your answer on them. If you are unsure of your answer, here are additional quadruples:\n{history3}Input quadruple: {v[2]}",
+                                                    "target" : f"{v[4]}"}
+                with open(f'{file_name}_no_sim_temp.json', 'a', encoding='utf8') as jsontext:
+                    jsontext.write(f"{json.dumps(to_write3)},")
+                prompts3.append(to_write3)
+                                                
+            if i == nr_of_samples - 1: break
+        
+        # save the final new prompts
+        with open(f'{file_name}.json', 'w', encoding='utf8') as jsontext:
+            json.dump(prompts, jsontext)
+        
+        if args.use_llm_similarity:
+            with open(f'{file_name}_llm_sim.json', 'w', encoding='utf8') as jsontext:
+                json.dump(prompts2, jsontext)
+        
+        if args.no_similarity:
+            with open(f'{file_name}_no_sim.json', 'w', encoding='utf8') as jsontext:
+                json.dump(prompts3, jsontext)
+
+        # save the index list of those samples that benefited from extra information, it will be needed in the testing part as we select samples from their normal test file as well as this ones
+        with open(f'{args.dataset}_gpt_index.json', 'w', encoding='utf8') as jsontext:
+            jsontext.write(str(list(sorted_d.keys())[:nr_of_samples]))
