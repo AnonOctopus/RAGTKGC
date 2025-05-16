@@ -1,7 +1,7 @@
 # RAGTKGC
 This is the official implementation of the paper **RAGTKGC: Undertaking Temporal Knowledge Graph Completion with Retrieval Augmented Generation**
 
-**Important Note! The code is written to run locally. However, the fine tuning part is provided as a Jupyter Notebook, so you can move it on Google Colab if you don't have enough resources. Any part that is moved on Colab requires you to change the paths by hand, as Google Colab starts looking for files from /Content/...**
+**Important Note! The code is written to run locally. However, the fine tuning part is also provided as a Jupyter Notebook, so you can move it on Google Colab if you don't have enough resources. Any part that is moved on Colab requires you to change the paths by hand, as Google Colab starts looking for files from /Content/...**
 
 ## Create a Conda Env
 
@@ -93,9 +93,46 @@ Create JSON train parameters:
 
 ## Fine tuning models
 
-The other parts of the framework run using command lines, however this part is provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
+If you want to change any hyperparameter, please update them manually in the desired training file.
+**Model's checkpoints are automatically saved at "./models". However, you need to rename the final checkpoint as desired. We recommend naming it as "name_of_base_model_dataset_history_modeling_algorithm". An example would be "llama-2-7B-icews18-ragtkgc". You can delete the other checkpoints if not needed.**
+
+### Flan-T5-Small
+
+To fine tune a Flan-T5-Small model, run the following command:
+```
+python training_T5.py --dataset name_of_dataset --trained_model_name 'name_of_fine_tuned_model' --train_file_path "path_to_the_training_file"
+```
+
+An example for icews18 would be:
+```
+python training_T5.py --dataset icews18 --trained_model_name 'flan-t5-small-icews18-ragtkgc' --train_file_path "ragtkgc/train/full/history_modeling_train/icews18.json"
+```
+Parameters:
+- **--dataset**, the name of the dataset, can be icews14 or icews18.
+- **--trained_model_name**, name of the fine tuned model, use the same one when renaming the checkpoint folder.
+- **output_dir**, path to where to save the model; default: "./models".
+- **train_file_path**, path to the training file; by default it starts searching from "./data/processed_new/{dataset}/", only provide the rest of the path as in the example above.
+
+### LLaMA2-7B
+
+To fine tune (QLORA) a LLaMA2-7B model, run the following command:
+```
+python training_LLaMA.py --dataset name_of_dataset --trained_model_name 'name_of_fine_tuned_model' --train_file_path "path_to_the_training_file"
+```
+
+An example for icews18 would be:
+```
+python training_LLaMA.py --dataset icews18 --trained_model_name 'llama-2-7b-icews18-ragtkgc' --train_file_path "ragtkgc/train/1024/history_modeling_train/icews18.json"
+```
+Parameters:
+- **--dataset**, the name of the dataset, can be icews14 or icews18.
+- **--trained_model_name**, name of the fine tuned model, use the same one when renaming the checkpoint folder.
+- **output_dir**, path to where to save the model; default: "./models".
+- **train_file_path**, path to the training file; by default it starts searching from "./data/processed_new/{dataset}/", only provide the rest of the path as in the example above.
+
+This part is also provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
 For LLaMA2-7B, we have used A100 GPU setting, while for Flan-T5-Small we opted for T4 GPU.
-Model's checkpoints are automatically saved at "./models". However, you need to rename the final checkpoint as desired. We recommend naming it as "name_of_base_model_dataset_history_modeling_algorithm". An example would be "Llama-2-7B-icews18-ragtkgc". You can delete the other checkpoints if not needed.
+
 
 ## Testing models
 
@@ -137,8 +174,26 @@ python bertscore.py --results_file "icews18/llama-2-7B-icews18-ragtkgc_icews18_r
 Parameters:
 - **--rf** **--results_file**, the path of the results file; by default, it looks in the results folder.
 
+
+### Compute metrics from results files
+
+You can compute the metrics for already saved predictions from the results folder, by running:
+```
+python compute_metrics_from_results.py --dataset "name_of_dataset" --file_name "name_of_the_results_file.jsonl"
+```
+
+An example for icews14 is:
+```
+python compute_metrics_from_results.py --dataset "icews14" --file_name "flan-t5-small-icews14-ragtkgc_icews14_gpt_rule_miner.jsonl"
+```
+
+Parameters:
+- **--dataset**, the name of the dataset; default: "icews14".
+- **--file_name**, the name of the results file. It automatically searches for it in "./results/{dataset}". Default: "all", as test all files from the target dataset folder.
+
 ## RAG with GPT 4.1
 
+**You need to save you own OpenAI key in api_key.txt file!**
 To obtain RAG-enhanced input prompts, you can use the following command:
 ```
 python rag_with_gpt_4_1.py --dataset "dataset_name" --rule_file "name_of_the_rule_bank.txt" --rag_version "desired_rag_version"
