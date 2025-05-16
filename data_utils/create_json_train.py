@@ -46,7 +46,7 @@ def parser():
     parser.add_argument("--path_save", default="", type=str)
     parser.add_argument('--nums_sample', default="16", type=parse_int_list, 
                         help='The numbers of samples in a list of integers separated by commas')
-    parser.add_argument("--name_train", default="icews18", type=str)
+    parser.add_argument("--dataset", type=str)
     parsed = vars(parser.parse_args())
     return parsed
 

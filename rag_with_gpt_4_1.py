@@ -160,6 +160,9 @@ def get_prompt(input_text, args, withRules = True, withRels = True):
     timestamps = read_json(f'./data/processed_new/{args.dataset}/ts2id.json')
     timestamps = flip_dict(timestamps)
 
+    year = '2018' if args.dataset == 'icews18' else '2014'
+    final_date = '2018-10-31' if args.dataset == 'icews18' else '2014-12-31'
+
     quad = input_text.split(' ')
     time = timestamps[int(quad[0][:-3])*24]
     rel = quad[2][:-1]
@@ -179,11 +182,11 @@ def get_prompt(input_text, args, withRules = True, withRels = True):
             rules += f'\t{rule}\n'
 
         return f'''
-    You will work with dates, in the form of YYYY-MM-DD, starting from 2018-01-01 to 2018-10-31, with an interval of a day. For example, 2018-01-01, 2018-01-02 and so on.
+    You will work with dates, in the form of YYYY-MM-DD, starting from {year}-01-01 to {final_date}, with an interval of a day. For example, {year}-01-01, {year}-01-02 and so on.
     You will deal with quads in the form of "date: [subject, relationship, object]", where date follows the mentioned format, subject and object are entities, and relationship is from the set of rules. You will receive a target quad with a missing object.
     You will also receive a set of rules that tells you what other chained relationships might happen before the target one. For example: "Threaten(X0,X1,T3) <- Consult(X0,X1,T0), _Criticize_or_denounce(X1,X0,T1), Consult(X0,X1,T2)" translates into "before X0 threatened X1 on date T3, X0 consulted T1 on date T0, X1 was criticized or denounced by X0 on date T1 and X0 consulted X1 on date T2". Notice that one relationship has an underscore(_) at the beginning. This means that it is an inverse relationship that points from object to subject, so we can travel backwards and return to the subject. This means there were no relationships pointing from X1 to X0, but there was an inverse relationship before T2 that connected back to X0.
     Your task is to use the set of given rules and dates to construct a history of events in quad format that may lead to finding the missing object from the given quad. Base your response on facts you were trained on. All information must be factually correct.
-    Make sure rules are followed. Try to find information in between the given dates interval. If you find information before 2018-01-01, you can use it, just output the date in the given format.
+    Make sure rules are followed. Try to find information in between the given dates interval. If you find information before {year}-01-01, you can use it, just output the date in the given format.
     Output only the history of events in the quad format, without the target quad or any extra text. Order them chronologically. If you find no information, output "None".
     ''',f'''
     Given rules: {rules}
@@ -192,11 +195,11 @@ def get_prompt(input_text, args, withRules = True, withRels = True):
     
     elif withRels:
         return f'''
-    You will work with dates, in the form of YYYY-MM-DD, starting from 2018-01-01 to 2018-10-31, with an interval of a day. For example, 2018-01-01, 2018-01-02 and so on.
+    You will work with dates, in the form of YYYY-MM-DD, starting from {year}-01-01 to {final_date}, with an interval of a day. For example, {year}-01-01, {year}-01-02 and so on.
     You will deal with quads in the form of "date: [subject, relationship, object]", where date follows the mentioned format, subject and object are entities, and relationship is from the given relationships' list. You will receive a target quad with a missing object.
     You will also receive a list of relationships that may have happened between the subject and the object. Use those names whenever you find information that fits or is close to any of the given relationship name.
     Your task is to use the list of relationships and dates to construct a history of events in quad format that may lead to finding the missing object from the given quad. Base your response on facts you were trained on. All information must be factually correct.
-    Make sure relationship names are within the given ones. Try to find information in between the given dates interval. If you find information before 2018-01-01, you can use it, just output the date in the given format.
+    Make sure relationship names are within the given ones. Try to find information in between the given dates interval. If you find information before {year}-01-01, you can use it, just output the date in the given format.
     Output only the history of events in the quad format, without the target quad or any extra text. Order them chronologically. If you find no information, output "None".
     ''',f'''
     Given relationships: {list(rels.keys())}
@@ -205,10 +208,10 @@ def get_prompt(input_text, args, withRules = True, withRels = True):
     
     else:
         return f'''
-    You will work with dates, in the form of YYYY-MM-DD, starting from 2018-01-01 to 2018-10-31, with an interval of a day. For example, 2018-01-01, 2018-01-02 and so on.
+    You will work with dates, in the form of YYYY-MM-DD, starting from {year}-01-01 to {final_date}, with an interval of a day. For example, {year}-01-01, {year}-01-02 and so on.
     You will deal with quads in the form of "date: [subject, relationship, object]", where date follows the mentioned format, subject and object are entities. You will receive a target quad with a missing object.
     Your task is to construct a history of events in quad format that may lead to finding the missing object from the given quad. Base your response on facts you were trained on. All information must be factually correct.
-    Make sure relationship names are concised, and use an underscore between words forming the relationship name, not spaces. Try to find information in between the given dates interval. If you find information before 2018-01-01, you can use it, just output the date in the given format.
+    Make sure relationship names are concised, and use an underscore between words forming the relationship name, not spaces. Try to find information in between the given dates interval. If you find information before {year}-01-01, you can use it, just output the date in the given format.
     Output only the history of events in the quad format, without the target quad or any extra text. Order them chronologically. If you find no information, output "None".
     ''',f'''
     Target quad: {final_quad}
@@ -400,7 +403,7 @@ if __name__ == "__main__":
     total_length = 0
 
     for g in groups:
-        print(f'There are {len(g.items())} samples where they were wrongly predicted {list(g.values())[0][0]}/{nr_of_results_files} times.')
+        print(f'There are {len(g.items())} samples with the target object wrongly predicted {list(g.values())[0][0]}/{nr_of_results_files} times.')
         total_length += len(g.items())
     
     # we continue taking from the next group if one is less than the requested number

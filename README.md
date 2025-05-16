@@ -199,6 +199,9 @@ Parameters:
 
 ## RAG with GPT 4.1
 
+In Appendix A, there are examples of prompts for retrieving extra information using any rag version.
+In Appendix B, there is an example of a test sample enhanced with information from RAGTKGC with GPT 4.1.
+
 **You need to save you own OpenAI key in api_key.txt file!**
 To obtain RAG-enhanced input prompts, you can use the following command:
 ```
