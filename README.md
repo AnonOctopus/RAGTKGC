@@ -44,7 +44,7 @@ Rules learning parameters:
 - **--transition_distr**, how to transition from an edge to another; default: exp (exponential), other choice is unif (uniform).
 - **-p** **--num_processes**, number of parallel processes, for accelerating. 
 - **-s** **--seed**, for reproduction purposes.
-- **-m** **--mining**, the rule mining approach, default: ragtkgc, other choices are gtkg and ragtkgc_no_walks (our algorithm but without walks, only start mining from each unique quadruple)
+- **-m** **--mining**, the rule mining approach, default: ragtkgc, other choices are gtkg and ragtkgc_no_walks (our algorithm but without walks, only start mining from each unique quadruple).
 
 You will get a rule bank file similar to "060723022344_r[1,2,3]_n200_exp_s12_rules.json" under the RAGTKGC/data/processed_new/{dataset_name}/output/{dataset_name} folder.
 
@@ -74,14 +74,14 @@ Output is saved at:
 ### Training files
 For training, you need to convert history_facts files into json file:
 ```
-python ./data_utils/create_json_train.py --dir_of_trainset 'the_full_trainset_to_convert (see [A])' --dir_of_answers 'the_test_answers (see [B])' --dir_of_entities2id 'the_json_of_entities2id' --path_save 'recommend_the_same_split_folder_as_the_one_converted'
+python ./data_utils/create_json_train.py --dir_of_trainset 'the_full_trainset_to_convert (see [A])' --dir_of_answers 'the_test_answers (see [B])' --dir_of_entities2id 'the_json_of_entities2id' --path_save 'recommend_the_same_split_folder_as_the_one_converted' --dataset name_of_dataset
 ```
 Position on the RAGTKGC root folder. An example for icews18 train split would be like:
 ```
-python data_utils/create_json_train.py --dir_of_trainset data/processed_new/icews18/ragtkgc/train/full//history_facts/history_facts_icews18.txt --dir_of_answers  data/processed_new/icews18/ragtkgc/train/full/test_answers/test_answers_icews18.txt --dir_of_entities2id data/processed_new/icews18/entity2id.json --path_save data/processed_new/icews18/ragtkgc/train/full/history_modeling_train
+python data_utils/create_json_train.py --dir_of_trainset data/processed_new/icews18/ragtkgc/train/full//history_facts/history_facts_icews18.txt --dir_of_answers  data/processed_new/icews18/ragtkgc/train/full/test_answers/test_answers_icews18.txt --dir_of_entities2id data/processed_new/icews18/entity2id.json --path_save data/processed_new/icews18/ragtkgc/train/full/history_modeling_train --dataset icews18
 ```
 
-You may do it for other splits too (test and valid), especially "test" as it will be needed for testing Just write their name instead of "train" in the provided example.
+You may do it for other splits too (test and valid), especially "test" as it will be needed for testing. Just write their name instead of "train" in the provided example.
 
 Create JSON train parameters:
 - **--dir_of_trainset**, the path to the training set directory.
@@ -89,7 +89,7 @@ Create JSON train parameters:
 - **--dir_of_entities2id**, the path to the entities2id file.
 - **--path_save**, where to save the results.
 - **--nums_sample**, how many samples to convert for training; default: 16 (and the whole set). For example, you can write '16,32,128' if you want files with those amounts of trainins samples, besides the whole set.
-- **--name_train**, the name of the output file; default: "icews18".
+- **--dataset**, the name of the output file is going to be the dataset name.
 
 ## Fine tuning models
 
@@ -124,13 +124,14 @@ An example for icews18 would be:
 ```
 python training_LLaMA.py --dataset icews18 --trained_model_name 'llama-2-7b-icews18-ragtkgc' --train_file_path "ragtkgc/train/1024/history_modeling_train/icews18.json"
 ```
+
 Parameters:
 - **--dataset**, the name of the dataset, can be icews14 or icews18.
 - **--trained_model_name**, name of the fine tuned model, use the same one when renaming the checkpoint folder.
 - **output_dir**, path to where to save the model; default: "./models".
 - **train_file_path**, path to the training file; by default it starts searching from "./data/processed_new/{dataset}/", only provide the rest of the path as in the example above.
 
-This part is also provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. ON Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
+This part is also provided as a Jupyter Notebook. The reason is that the training part was moved to Google Colab due to intensive resources needed to fine tune LLMs. On Colab, it is easier to work with notebooks than command lines. You can also run the notebook locally. All instructions are provided in the notebook, which is easy-to-follow.
 For LLaMA2-7B, we have used A100 GPU setting, while for Flan-T5-Small we opted for T4 GPU.
 
 
@@ -145,7 +146,12 @@ python run_hf.py --base_model "the base model" --finetuned_model "fine tuned ver
 
 An example for testing a LLaMA2-7B-ragtkgc LORA version on icews18 dataset:
 ```
-python run_hf.py --base_model "TheBloke/Llama-2-7B-fp16" --finetuned_model "Llama-2-7B-icews18-ragtkgc" --dataset "icews18" --dataset_path "ragtkgc/test/10000/history_modeling_test/icews18_test.json"
+python run_hf.py --base_model "TheBloke/Llama-2-7B-fp16" --finetuned_model "llama-2-7B-icews18-ragtkgc" --dataset "icews18" --dataset_path "ragtkgc/test/10000/history_modeling_test/icews18_test.json"
+```
+
+An example for testing a LLaMA2-7B-ragtkgc LORA version on icews18 dataset with RAG:
+```
+python run_hf.py --base_model "TheBloke/Llama-2-7B-fp16" --finetuned_model "llama-2-7B-icews18-ragtkgc" --dataset "icews18" --dataset_path "ragtkgc/test/10000/history_modeling_test/icews18_test.json" --dataset_rag_path "test_rag/icews18_gpt_given_rules.json"
 ```
 
 Parameters:
@@ -160,7 +166,7 @@ When testing with a rag dataset, we automatically load the original test file al
 
 ### Calculating BERTScore
 
-BERTScore is calculated using a PLM, such as roberta-large. Thus, if calculated after each prediction as the other metrics, it would require a lot of extra time. We provide a way of determining it afterwards, based on the results file.
+BERTScore is calculated using a PLM, such as roberta-large. Thus, if calculated live (during testing) after each prediction as the other metrics, it would require a lot of extra time. We provide a way of determining it afterwards, based on the results file.
 
 It can be run using the following command:
 ```
@@ -204,8 +210,7 @@ An example for icews14:
 python rag_with_gpt_4_1.py --dataset "icews14" --rule_file "080525131706_r[1]_n200_exp_s1_rules.txt" --rag_version "gpt-given-rules"
 ```
 
-You will be prompt to input how many samples you want to enhance with RAG. Additional information about how many samples were wrongly predicted by already existing fine tuned versions of models will also be shown to make an informed decision. This metric is based on files from the results folder. You will see a message like "There are 2324 samples where they were wrongly predicted 8/8 times. There are 789 samples where they were wrongly predicted 7/8 times." It means that out of 8 results files (8 different predictions done by different models for the same test sample), 2324 samples were wrongly predicted 8 times (basically no model was able to predict the right target answer), and so on. When you will be prompt to input the number of samples to be extended with RAGTKGC with GPT 4.1, you will have to input a number lower than the maximum available samples. Also, if the input number exceeds the first group of samples (e.g. 3000 is more than 2324), we subsequently take samples from the next group.
-
+You will be prompt to input how many samples you want to enhance with RAG. Additional information about how many samples were wrongly predicted by already existing fine tuned versions of models will also be shown to make an informed decision. This metric is based on files from the results folder. You will see a message like "There are 2324 samples with the target object wrongly predicted 8/8 times. There are 789 samples with the target object wrongly predicted 7/8 times." It means that out of 8 results files (8 different predictions done by different models for the same test sample), 2324 samples had the target object wrongly predicted 8 times (basically no model was able to predict the right target answer), and so on. When you will be prompt to input the number of samples to be extended with RAGTKGC with GPT 4.1, you will have to input a number lower than the maximum available samples. Also, if the input number exceeds the first group of samples (e.g. 3000 is more than 2324), we subsequently take samples from the next group. 
 Parameters:
 
 - **--dataset**, name of the dataset, default: "icews18".
@@ -215,5 +220,5 @@ Parameters:
 - **--use_llm_similarity**, if entities/relations names should be mapped to known ones using llm (SentenceTransformer('all-MiniLM-L6-v2')) similarity; default = False.
 - **--no_similarity**, if entities/relations names should be kept as generated by GPT 4.1; default = False.
 
-Files are saved at './data/processed_mew/{args.dataset}/test_rag/{args.dataset}_{args.rag_version}'. You will also see there temporary files marked with the suffix 'temp', which dynamically stores each processed sample, in case any unexpected interruptions occur before being able to save the whole proccesed set of samples. If it happens, you will have to manually write in the rag_with_gpt_4_1.py file to ignore the first n processed samples (an easy if i < n: continue will do). Also, you will have to manually concatenate the resulted temporary files (make sure to put "[" at the beginning and "]" at the end of the new file).
-
+Files are saved at './data/processed_mew/{args.dataset}/test_rag/{args.dataset}_{args.rag_version}'. You will also see there temporary files marked with the suffix 'temp', which dynamically stores each processed sample, in case any unexpected interruptions occur before being able to save the whole proccesed set of samples. If it happens, you will have to manually write in the rag_with_gpt_4_1.py file to ignore the first n processed samples (an easy "if i < n: continue" will do). Also, you will have to manually concatenate the resulted temporary files (make sure to put "[" at the beginning and "]" at the end of the new file).
+You will also see a file such as "{dataset}_gpt_index.txt" which stores a list of indexes of those samples from the test set that were enhanced with RAG. Thus, when testing, we know to take its enhanced version if necessary.
