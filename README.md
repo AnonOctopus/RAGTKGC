@@ -1,6 +1,8 @@
 # RAGTKGC
 This is the official implementation of the paper **RAGTKGC: Undertaking Temporal Knowledge Graph Completion with Retrieval Augmented Generation**
 
+**If you cannot clone the repo, please download it from here --> https://drive.google.com/file/d/1Re-H4k78tfqoC9D_hzHjmObIGL7oChMj/view?usp=drive_link**
+
 **Important Note! The code is written to run locally. However, the fine tuning part is also provided as a Jupyter Notebook, so you can move it on Google Colab if you don't have enough resources. Any part that is moved on Colab requires you to change the paths by hand, as Google Colab starts looking for files from /Content/...**
 
 ## Create a Conda Env
