@@ -428,7 +428,7 @@ if __name__ == "__main__":
         for i, (k,v) in tqdm(enumerate(sorted_d.items())):
             
             
-            file_name = f'./data/processed_mew/{args.dataset}/test_rag/{args.dataset}_{args.rag_version}'
+            file_name = f'./data/processed_new/{args.dataset}/test_rag/{args.dataset}_{args.rag_version}'
 
             if args.rag_version == 'gpt-given-rules':
 
