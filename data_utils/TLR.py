@@ -7,7 +7,8 @@ class Retriever:
     def __init__(self, 
                  test, all_facts, 
                  entities, relations, times_id, 
-                 num_relations, chains, rel_keys, dataset, retrieve_type='TLogic', rule_length_all = False):
+                 num_relations, chains, rel_keys, dataset, retrieve_type='TLogic', rule_length_all = False,
+                 inverse_body_object_match=False, early_stop_at_num_facts=False):
         self.retrieve_type = retrieve_type
         self.dataset = dataset
         self.test = test
@@ -19,6 +20,8 @@ class Retriever:
         self.num_relations = num_relations
         self.chains = chains
         self.rule_length_all = rule_length_all
+        self.inverse_body_object_match = inverse_body_object_match
+        self.early_stop_at_num_facts = early_stop_at_num_facts
         
         self.entities_flip = flip_dict(self.entities)
         self.relations_flip = flip_dict(self.relations)
@@ -55,6 +58,7 @@ class Retriever:
         #Pure Entity mode
         test_text = []
         test_idx = []
+        test_rule_ids = []
 
         for i in tqdm(range(0, len(self.test))): #csv has a header, txt has no header. len(self.test)
             num_facts = 50 #20 or 100
@@ -73,7 +77,8 @@ class Retriever:
 
             test_idx.append(idx)
             test_text.append(history_query)
-        return test_idx, test_text
+            test_rule_ids.append([])
+        return test_idx, test_text, test_rule_ids
     
     def tlogic_prepro(self, i):
         test_sub, test_rel, _, test_time, _ = self.test[i].strip().split("\t")
@@ -91,11 +96,12 @@ class Retriever:
         s_0 = s_t & s_test_sub #Get: major premise
         head_rel = self.relations[test_rel] #Get the idx corresponding to test_relation: 0,1,2,...
         time = self.times_id[test_time] #To move forward the time according to the id corresponding relationship of time. Get int from str
-        return s_0, s_t, head_rel, time, test_sub, test_rel
+        return s_0, s_t, head_rel, time, test_sub, test_rel # all subject facts earlier than test_time, all facts earlier than test_time, the idx of test_relation, time in id form, test_sub and test_rel in id
     
     def build_tl(self):
         test_text = []
         test_idx = []
+        test_rule_ids = []
 
         for i in tqdm(range(0,  len(self.test))): #Starting from 1 because there is a header. 1, len(test)
             num_facts = 50 #Set it again for each question, as the following may change.
@@ -108,11 +114,18 @@ class Retriever:
                 history_query = [str(time)+': ['+ test_sub +', '+ test_rel+',\n']
                 test_idx.append([]) #At this time idx is a blank line
                 test_text.append(history_query)
+                test_rule_ids.append([])
                 #print(i, 'no chain in this line')
                 continue
-            s_0 = np.array(list(s_0))  #Convert collection to NumPy array
+            s_0_sub = np.array(list(s_0))  # Default anchor: fact subject == query subject
+            s_0_obj = None
+            if self.inverse_body_object_match:
+                idx_test_obj = np.where(self.col_obj == test_sub)[0]
+                s_test_obj = set(idx_test_obj)
+                s_0_obj = np.array(list(s_t & s_test_obj))
             #After the above preparations, start searching for facts by chain.
             idx_chain = []
+            query_rule_ids = []
             for k in range( 0,len(self.chains[str(head_rel)]) ): #There are len(chains[str(head_rel)]) chains
                 if self.rule_length_all:
                     idx_chain.append(k)
@@ -122,19 +135,32 @@ class Retriever:
                         idx_chain.append(k)
             for k in idx_chain: #TLogic (or TLogic-3), as long as the shortest len=1 chain
                 idx_case = []
-                body_rel_len = len( self.chains[str(head_rel)][k]['body_rels'] ) #The length of this chain
-                rel = self.chains[str(head_rel)][k]['body_rels'][-1] %self.num_relations 
-                idx_rel = np.where(self.col_rel == self.rel_keys[rel])[0]
-                idx_rel = np.intersect1d(idx_rel, s_0)  #Using NumPy functions for intersection operations
+                chain_rule = self.chains[str(head_rel)][k]
+                rule_id = chain_rule.get('rule_id', None)
+                body_rel_len = len( chain_rule['body_rels'] ) #The length of this chain
+                body_rel_last = chain_rule['body_rels'][-1]
+                rel = body_rel_last %self.num_relations # idx of rel or (if reverse) the index of the actual rel
+                idx_rel = np.where(self.col_rel == self.rel_keys[rel])[0] # no matter whether it is reverse or not, the relation in the fact is the same as the relation in the chain, so we can directly search for the relation in the fact
+
+                # Optional inverse handling: if rule body uses inverse relation,
+                # match query subject against fact object instead of fact subject.
+                if self.inverse_body_object_match and body_rel_last >= self.num_relations:
+                    idx_anchor = s_0_obj if s_0_obj is not None else s_0_sub
+                else:
+                    idx_anchor = s_0_sub
+
+                idx_rel = np.intersect1d(idx_rel, idx_anchor)  #Using NumPy functions for intersection operations; 
                 idx_case = idx_rel
                 idx_case.tolist()
                 if len(idx_case) != 0: #If it is not empty, retrieve it.
+                    if rule_id is not None:
+                        query_rule_ids.append(rule_id)
                     idx_case = list( set(idx_case) )
                     idx = list( set( idx + idx_case) )
                 else: 
                     continue #If no such chain exists, jump to the next chain
-                if len(idx)>=num_facts: 
-                    break #Break out of the loop on chains and go to the next test
+                if self.early_stop_at_num_facts and len(idx) >= num_facts:
+                    break #Stop iterating rules once we have enough facts
             #time reordering
             idx.sort(reverse=True)
             #Idx with chain.sort(reverse=true)
@@ -146,6 +172,7 @@ class Retriever:
                 for a in idx:         
                     facts.append(self.all_facts[a])
             test_idx.append(idx)
+            test_rule_ids.append(list(dict.fromkeys(query_rule_ids)))
             if len(facts)==0: #If the test relation has no chain, nothing will be done.
                 history_query = self.build_history_query(time, test_sub, test_rel) #Self.times id[time]
                 test_text.append(history_query)
@@ -158,7 +185,7 @@ class Retriever:
             history_query = self.build_history_query(time, test_sub, test_rel, histories=histories)
             test_text.append(history_query)
             ti.sleep(0.001)
-        return test_idx, test_text
+        return test_idx, test_text, test_rule_ids
 
     def collect_hist(self, i, facts, num_facts):
         period = 1
@@ -191,13 +218,13 @@ class Retriever:
     def call_function(self, func_name):
         func = getattr(self, func_name)
         if func and callable(func):
-            test_idx, test_text = func()
+            test_idx, test_text, test_rule_ids = func()
         else:
             print("Retrieve function not found")
-        return test_idx, test_text
+        return test_idx, test_text, test_rule_ids
     
     def get_output(self):
         type_retr = "bs" if self.retrieve_type == 'bs' else "tl"
-        test_idx, test_text = self.call_function("build_"+type_retr)
+        test_idx, test_text, test_rule_ids = self.call_function("build_"+type_retr)
         
-        return test_idx, test_text
+        return test_idx, test_text, test_rule_ids
