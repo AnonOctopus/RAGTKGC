@@ -1,4 +1,5 @@
 from datasets.arrow_dataset import np
+import json
 import torch
 from tqdm import tqdm
 from transformers import BitsAndBytesConfig,AutoModelForCausalLM, AutoTokenizer, logging as tf_logging
@@ -15,6 +16,42 @@ from utils import (
 from datasets import load_dataset
 
 tf_logging.set_verbosity_error()
+
+
+def get_token_limit(tokenizer_obj):
+  token_limit = getattr(tokenizer_obj, "max_len_single_sentence", None)
+  if token_limit is None or token_limit <= 0 or token_limit > 1_000_000:
+    token_limit = getattr(tokenizer_obj, "model_max_length", None)
+  if token_limit is None or token_limit <= 0 or token_limit > 1_000_000:
+    raise ValueError("Could not infer a valid tokenizer max input length.")
+  return int(token_limit)
+
+
+def init_length_stats():
+  return {
+    "count": 0,
+    "sum": 0,
+    "min": None,
+    "max": None,
+  }
+
+
+def update_length_stats(stats, value):
+  stats["count"] += 1
+  stats["sum"] += value
+  stats["min"] = value if stats["min"] is None else min(stats["min"], value)
+  stats["max"] = value if stats["max"] is None else max(stats["max"], value)
+
+
+def finalize_length_stats(stats):
+  if stats["count"] == 0:
+    return {"count": 0, "avg": 0.0, "min": None, "max": None}
+  return {
+    "count": stats["count"],
+    "avg": stats["sum"] / stats["count"],
+    "min": stats["min"],
+    "max": stats["max"],
+  }
 
 
 if __name__ == "__main__":
@@ -55,6 +92,7 @@ if __name__ == "__main__":
       
     model.eval()
     print(f"model is loaded on device {model.device.type}")
+    token_limit = get_token_limit(tokenizer)
 
     metric = HitsMetric()
     dataset_path = f'./data/processed_new/{args.dataset}/' + args.dataset_path
@@ -82,6 +120,11 @@ if __name__ == "__main__":
 
       filename = get_filename(args.dataset, dataset_path = args.dataset_path, model_name = args.finetuned_model)
 
+    overall_len_stats = init_length_stats()
+    below_len_stats = init_length_stats()
+    above_len_stats = init_length_stats()
+    counter_above_limit = 0
+
     with torch.no_grad(), open(filename, "w", encoding="utf-8") as writer, tqdm(test_set) as pbar:
 
       for i, x in enumerate(pbar):
@@ -91,12 +134,30 @@ if __name__ == "__main__":
               j = indexes.index(i)
               x = test_set_rag[j]
               
-
           model_input = x['context']
+          query_line = x['context'].split('\n')[-1]
+
+          encoded = tokenizer(model_input, add_special_tokens=False)
+          model_input_ids = encoded['input_ids']
+          input_token_len = len(model_input_ids)
+          update_length_stats(overall_len_stats, input_token_len)
+
+          if input_token_len <= token_limit:
+            update_length_stats(below_len_stats, input_token_len)
+          else:
+            counter_above_limit += 1
+            update_length_stats(above_len_stats, input_token_len)
+            if args.tail_truncate_long_inputs:
+              model_input_ids = model_input_ids[-token_limit:]
+              model_input = tokenizer.decode(
+                model_input_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+              )
 
           predictions = predict(tokenizer, model, model_input, args, output_text = True)
 
-          text = model_input.split('\n')[-1] # get the target quadruple from input prompt
+          text = query_line # get the target quadruple from input prompt
             
           # depending on the input prompt, the selection might need extra steps
 
@@ -104,7 +165,7 @@ if __name__ == "__main__":
             time = text.split(":")[1].strip()
             triple = text.split(":")[2].strip()
           else:
-            time, triple = text.split(':')
+            time, triple = text.split(':', 1)
           
           # get the relation and object; this is only needed to correctly write the results output file
           triple = triple.strip()
@@ -119,4 +180,18 @@ if __name__ == "__main__":
           # update metrics with the new prediction
           update_metric(example, metric, args)
           pbar.set_postfix(metric.dump())
-            
+
+    print(f"Number of samples with input prompt above token limit ({token_limit}): {counter_above_limit}")
+    print("Input token length stats:")
+    print(
+      json.dumps(
+        {
+          "token_limit": token_limit,
+          "tail_truncate_long_inputs": args.tail_truncate_long_inputs,
+          "overall": finalize_length_stats(overall_len_stats),
+          "below_or_equal_limit": finalize_length_stats(below_len_stats),
+          "above_limit": finalize_length_stats(above_len_stats),
+        },
+        indent=2,
+      )
+    )
