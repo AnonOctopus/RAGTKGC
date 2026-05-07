@@ -31,14 +31,19 @@ mining_alg = parsed['mining']
 dataset_dir = "../../data/processed_new/" + dataset + "/"
 data = Grapher(dataset_dir)
 temporal_walk = Temporal_Walk(data.train_idx, data.inv_relation_id, transition_distr)
-rl = Rule_Learner(temporal_walk.edges, data.id2relation, data.inv_relation_id, dataset)
+rl = Rule_Learner(temporal_walk.edges, data.id2relation, data.inv_relation_id, dataset, mining_alg=mining_alg)
 all_relations = sorted(temporal_walk.edges)  # Learn for all relations  
-if mining_alg in ['ragtkgc','ragtkgc_no_walks']:
-    unique_quads = get_unique_quads_per_rels(dataset, f'../../data/original/{dataset}/train.txt')
-    unique_quads = dict(sorted(unique_quads.items(), key=lambda item: item[0], reverse = False))
+
+if mining_alg in ['ragtkgc','ragtkgc_no_walks', 'ragtkgc_no_mining']:
+    if mining_alg in ['ragtkgc','ragtkgc_no_walks']:
+        unique_quads = get_unique_quads_per_rels(dataset, f'../../data/original/{dataset}/train.txt')
+    elif mining_alg == 'ragtkgc_no_mining': 
+        unique_quads = get_unique_quads_per_rels(dataset, f'../../data/original/{dataset}/train.txt', infer_from_type = True)
+
+    unique_quads = dict(sorted(unique_quads.items(), key=lambda item: item[0], reverse = False)) 
 
 #print(temporal_walk.edges[160])
-#print(unique_quads[160])
+#print(unique_quads[0])
 
 def learn_rules(i, num_relations):
     """
@@ -69,10 +74,24 @@ def learn_rules(i, num_relations):
     for k in relations_idx:
         
         rel = all_relations[k]
- 
+
         for length in rule_lengths:
             
             it_start = time.time()
+
+            if mining_alg == 'ragtkgc_no_mining':
+                if length > 1:
+                    print("RAGTKGC_NO_MINING only mines rules of length 1. Skipping relation {} for length {}.".format(rel, length))
+                    break
+
+                for st in unique_quads[rel]:
+                    
+                    walk = dict()
+                    walk["head_rel"] = int(rel)
+                    walk["body_rels"] = [int(st)]
+                    walk["var_constraints"] = []
+                    rl.create_rule(walk, custom_generated = True)
+
 
             if mining_alg == 'ragtkgc':
                 
