@@ -1,12 +1,177 @@
 import os
 import json
 import itertools
+import hashlib
 import numpy as np
 from collections import Counter
 
 
+def canonical_rule_payload(rule):
+    return {
+        "head_rel": int(rule["head_rel"]),
+        "body_rels": [int(x) for x in rule["body_rels"]],
+        "var_constraints": [list(map(int, x)) for x in rule["var_constraints"]],
+    }
+
+
+def make_rule_id(rule):
+    payload = canonical_rule_payload(rule)
+    payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload_str.encode("utf-8")).hexdigest()
+
+
+def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_pool_file_path=None, write_rule_ids_back=True):
+    """
+    Import an already computed rules JSON file and merge it into the common rule pool.
+
+    Parameters:
+        rules_file_path (str): path to per-algorithm rules JSON
+        mining_alg (str): mining algorithm label to register in found_by/algorithm_stats
+        rule_pool_file_path (str|None): optional explicit path for common_rule_pool.json
+        write_rule_ids_back (bool): if True, persist generated rule_id/found_by back into rules file
+
+    Returns:
+        dict: summary with counts and output paths
+    """
+
+    with open(rules_file_path, "r", encoding="utf-8") as fin:
+        rules_dict = json.load(fin)
+
+    if rule_pool_file_path is None:
+        rule_pool_file_path = os.path.join(os.path.dirname(rules_file_path), "common_rule_pool.json")
+
+    if os.path.exists(rule_pool_file_path):
+        with open(rule_pool_file_path, "r", encoding="utf-8") as fin:
+            rule_pool = json.load(fin)
+    else:
+        rule_pool = {}
+
+    total_rules = 0
+    new_rules = 0
+    updated_rules = 0
+
+    for rel_key in list(rules_dict.keys()):
+        rel_rules = rules_dict[rel_key]
+        for rule in rel_rules:
+            total_rules += 1
+            rule_id = rule.get("rule_id") or make_rule_id(rule)
+            rule["rule_id"] = rule_id
+            rule["found_by"] = sorted(set(rule.get("found_by", []) + [mining_alg]))
+
+            canonical = canonical_rule_payload(rule)
+            if rule_id not in rule_pool:
+                new_rules += 1
+                rule_pool[rule_id] = {
+                    "rule_id": rule_id,
+                    "head_rel": canonical["head_rel"],
+                    "body_rels": canonical["body_rels"],
+                    "var_constraints": canonical["var_constraints"],
+                    "found_by": [],
+                    "algorithm_stats": {},
+                }
+            else:
+                updated_rules += 1
+
+            found_by = set(rule_pool[rule_id].get("found_by", []))
+            found_by.add(mining_alg)
+            rule_pool[rule_id]["found_by"] = sorted(found_by)
+            rule_pool[rule_id]["algorithm_stats"][mining_alg] = {
+                "conf": rule.get("conf"),
+                "rule_supp": rule.get("rule_supp"),
+                "body_supp": rule.get("body_supp"),
+            }
+
+    with open(rule_pool_file_path, "w", encoding="utf-8") as fout:
+        json.dump(rule_pool, fout, indent=2)
+
+    if write_rule_ids_back:
+        with open(rules_file_path, "w", encoding="utf-8") as fout:
+            json.dump(rules_dict, fout)
+
+    return {
+        "rules_file_path": rules_file_path,
+        "rule_pool_file_path": rule_pool_file_path,
+        "total_rules_seen": total_rules,
+        "new_rules_added": new_rules,
+        "existing_rules_updated": updated_rules,
+    }
+
+
+def add_rule_ids_from_common_pool(rules_file_path, rule_pool_file_path=None):
+    """
+    Update an already computed rules JSON file by adding rule_id from common_rule_pool.json.
+
+    This helper does not modify the common pool; it only enriches the rules file.
+
+    Parameters:
+        rules_file_path (str): path to per-algorithm rules JSON
+        rule_pool_file_path (str|None): optional explicit path for common_rule_pool.json
+
+    Returns:
+        dict: summary with counts and paths
+    """
+
+    if rule_pool_file_path is None:
+        rule_pool_file_path = os.path.join(os.path.dirname(rules_file_path), "common_rule_pool.json")
+
+    if not os.path.exists(rule_pool_file_path):
+        raise FileNotFoundError(f"Common rule pool not found: {rule_pool_file_path}")
+
+    with open(rules_file_path, "r", encoding="utf-8") as fin:
+        rules_dict = json.load(fin)
+    with open(rule_pool_file_path, "r", encoding="utf-8") as fin:
+        rule_pool = json.load(fin)
+
+    # Build canonical lookup for robust matching even if the key format changes.
+    canonical_to_id = {}
+    for pool_rule_id, pool_rule in rule_pool.items():
+        canonical = canonical_rule_payload(pool_rule)
+        canonical_key = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        canonical_to_id[canonical_key] = pool_rule_id
+
+    total_rules = 0
+    ids_added = 0
+    ids_updated = 0
+    ids_missing = 0
+
+    for rel_key in list(rules_dict.keys()):
+        rel_rules = rules_dict[rel_key]
+        for rule in rel_rules:
+            total_rules += 1
+
+            computed_id = make_rule_id(rule)
+            canonical_key = json.dumps(
+                canonical_rule_payload(rule), sort_keys=True, separators=(",", ":")
+            )
+
+            matched_id = computed_id if computed_id in rule_pool else canonical_to_id.get(canonical_key)
+
+            if matched_id is None:
+                ids_missing += 1
+                continue
+
+            existing = rule.get("rule_id")
+            rule["rule_id"] = matched_id
+            if existing is None:
+                ids_added += 1
+            elif existing != matched_id:
+                ids_updated += 1
+
+    with open(rules_file_path, "w", encoding="utf-8") as fout:
+        json.dump(rules_dict, fout)
+
+    return {
+        "rules_file_path": rules_file_path,
+        "rule_pool_file_path": rule_pool_file_path,
+        "total_rules_seen": total_rules,
+        "rule_ids_added": ids_added,
+        "rule_ids_updated": ids_updated,
+        "rule_ids_missing_in_pool": ids_missing,
+    }
+
+
 class Rule_Learner(object):
-    def __init__(self, edges, id2relation, inv_relation_id, dataset):
+    def __init__(self, edges, id2relation, inv_relation_id, dataset, mining_alg="unknown"):
         """
         Initialize rule learner object.
 
@@ -23,14 +188,62 @@ class Rule_Learner(object):
         self.edges = edges
         self.id2relation = id2relation
         self.inv_relation_id = inv_relation_id
+        self.mining_alg = mining_alg
 
         self.found_rules = []
+        self.found_rule_ids = set()
         self.rules_dict = dict()
         self.output_dir = "../../data/processed_new/" + dataset + "/output/" + dataset + "/"
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
+        self.rule_pool_file = self.output_dir + "common_rule_pool.json"
 
-    def create_rule(self, walk):
+    def _canonical_rule_payload(self, rule):
+        return canonical_rule_payload(rule)
+
+    def _make_rule_id(self, rule):
+        return make_rule_id(rule)
+
+    def _load_common_rule_pool(self):
+        if os.path.exists(self.rule_pool_file):
+            with open(self.rule_pool_file, "r", encoding="utf-8") as fin:
+                return json.load(fin)
+        return {}
+
+    def _save_common_rule_pool(self, rule_pool):
+        with open(self.rule_pool_file, "w", encoding="utf-8") as fout:
+            json.dump(rule_pool, fout, indent=2)
+
+    def _update_common_rule_pool(self):
+        rule_pool = self._load_common_rule_pool()
+
+        for _, rel_rules in self.rules_dict.items():
+            for rule in rel_rules:
+                rule_id = rule["rule_id"]
+                canonical = self._canonical_rule_payload(rule)
+
+                if rule_id not in rule_pool:
+                    rule_pool[rule_id] = {
+                        "rule_id": rule_id,
+                        "head_rel": canonical["head_rel"],
+                        "body_rels": canonical["body_rels"],
+                        "var_constraints": canonical["var_constraints"],
+                        "found_by": [],
+                        "algorithm_stats": {},
+                    }
+
+                found_by = set(rule_pool[rule_id].get("found_by", []))
+                found_by.add(self.mining_alg)
+                rule_pool[rule_id]["found_by"] = sorted(found_by)
+                rule_pool[rule_id]["algorithm_stats"][self.mining_alg] = {
+                    "conf": rule.get("conf"),
+                    "rule_supp": rule.get("rule_supp"),
+                    "body_supp": rule.get("body_supp"),
+                }
+
+        self._save_common_rule_pool(rule_pool)
+
+    def create_rule(self, walk, custom_generated = False):
         """
         Create a rule given a cyclic temporal random walk.
         The rule contains information about head relation, body relations,
@@ -47,22 +260,29 @@ class Rule_Learner(object):
             rule (dict): created rule
         """
 
-        rule = dict()
-        rule["head_rel"] = int(walk["relations"][0])
-        rule["body_rels"] = [
-            self.inv_relation_id[x] for x in walk["relations"][1:][::-1]
-        ]
-        rule["var_constraints"] = self.define_var_constraints(
-            walk["entities"][1:][::-1]
-        )
+        if not custom_generated:
+            rule = dict()
+            rule["head_rel"] = int(walk["relations"][0])
+            rule["body_rels"] = [
+                self.inv_relation_id[x] for x in walk["relations"][1:][::-1]
+            ]
+            rule["var_constraints"] = self.define_var_constraints(
+                walk["entities"][1:][::-1]
+            )
+        else:
+            rule = walk
 
-        if rule not in self.found_rules:
+        rule["rule_id"] = self._make_rule_id(rule)
+        rule["found_by"] = [self.mining_alg]
+
+        if rule["rule_id"] not in self.found_rule_ids:
             self.found_rules.append(rule.copy())
+            self.found_rule_ids.add(rule["rule_id"])
             (
                 rule["conf"],
                 rule["rule_supp"],
                 rule["body_supp"],
-            ) = self.estimate_confidence(rule)
+            ) = self.estimate_confidence(rule, full_samples = True if custom_generated else False)
 
             if rule["conf"]:
                 self.update_rules_dict(rule)
@@ -86,7 +306,7 @@ class Rule_Learner(object):
 
         return sorted(var_constraints)
 
-    def estimate_confidence(self, rule, num_samples=500):
+    def estimate_confidence(self, rule, num_samples=500, full_samples = False):
         """
         Estimate the confidence of the rule by sampling bodies and checking the rule support.
 
@@ -102,12 +322,25 @@ class Rule_Learner(object):
         """
 
         all_bodies = []
-        for _ in range(num_samples):
-            sample_successful, body_ents_tss = self.sample_body(
-                rule["body_rels"], rule["var_constraints"]
-            )
-            if sample_successful:
-                all_bodies.append(body_ents_tss)
+        
+
+        if not full_samples:
+
+            for _ in range(num_samples):
+                sample_successful, body_ents_tss = self.sample_body(
+                    rule["body_rels"], rule["var_constraints"]
+                )
+                if sample_successful:
+                    all_bodies.append(body_ents_tss)
+
+        else:
+
+            for i in range(len(self.edges[rule["body_rels"][0]])):
+                sample_successful, body_ents_tss = self.sample_body(
+                    rule["body_rels"], rule["var_constraints"], index = i
+                )
+                if sample_successful:
+                    all_bodies.append(body_ents_tss)
 
         all_bodies.sort()
         unique_bodies = list(x for x, _ in itertools.groupby(all_bodies))
@@ -120,7 +353,7 @@ class Rule_Learner(object):
 
         return confidence, rule_support, body_support
 
-    def sample_body(self, body_rels, var_constraints):
+    def sample_body(self, body_rels, var_constraints, index = None):
         """
         Sample a walk according to the rule body.
         The sequence of timesteps should be non-decreasing.
@@ -139,7 +372,7 @@ class Rule_Learner(object):
         body_ents_tss = []
         cur_rel = body_rels[0]
         rel_edges = self.edges[cur_rel]
-        next_edge = rel_edges[np.random.choice(len(rel_edges))]
+        next_edge = rel_edges[np.random.choice(len(rel_edges))] if index == None else rel_edges[index]
         cur_ts = next_edge[3]
         cur_node = next_edge[2]
         body_ents_tss.append(next_edge[0])
@@ -242,6 +475,8 @@ class Rule_Learner(object):
         Returns:
             None
         """
+
+        self._update_common_rule_pool()
 
         rules_dict = {int(k): v for k, v in self.rules_dict.items()}
         filename = "{0}_r{1}_n{2}_{3}_s{4}_rules.json".format(
@@ -354,3 +589,18 @@ def rules_statistics(rules_dict):
         lengths += [len(x["body_rels"]) for x in rules_dict[rel]]
     rule_lengths = [(k, v) for k, v in Counter(lengths).items()]
     print("Number of rules by length: ", sorted(rule_lengths))
+
+
+if __name__ == "__main__":
+
+    result = update_common_rule_pool_from_rules_file(
+        rules_file_path="../../data/processed_new/icews14/output/icews14/080525134642_r[1]_n200_exp_s1_rules.json",
+        mining_alg="gtkg"
+    )
+    print(result)
+
+    
+    # result = add_rule_ids_from_common_pool(
+    #     rules_file_path="../../data/processed_new/icews14/output/icews14/080525131706_r[1]_n200_exp_s1_rules.json"
+    # )
+    # print(result)
