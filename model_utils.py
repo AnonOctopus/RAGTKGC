@@ -101,7 +101,8 @@ def predict(tokenizer, model, prompt, args, output_text = False):
                     f'| {json.dumps(x["tokens"]):30s} | {x["text"]:10s} | {x["probability"]:.4f} | {np.exp(x["probability"]):.2%}'
                     )
 
-        predictions = parse_results(results)
+        # Return a list of plain prediction strings (text only, no probability tuples)
+        predictions = [x[0] for x in parse_results(results)]
         
         # method for decoding predictions for the second approach of calculating the metrics. Not reported
         # if used, make sure to also return pred and modify in run_hf.py to save it and pass it to write results; also, modify in utils.py (update_metrics) to calculate them using these predictions
@@ -141,11 +142,10 @@ def predict(tokenizer, model, prompt, args, output_text = False):
             
             if 'gtkg' in args.finetuned_model:
                 predictions.append(beam_pred.split('\n')[0].strip()) # needs an extra processing step, as this variants predict more than the target
-            else: predictions.append(beam_pred)
+            else:
+                predictions.append(beam_pred)
 
             if args.verbose:
-                print("{}: {}".format(i,beam_pred ))
-        
-        
+                print("{}: {}".format(i, beam_pred))
 
     return predictions
