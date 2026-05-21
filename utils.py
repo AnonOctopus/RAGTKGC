@@ -75,23 +75,25 @@ def get_args():
     parser.add_argument("--dataset_path", default="ragtkgc/test/10000/history_modeling_test/icews18_test.json", type=str) # path to the test set
     parser.add_argument("--dataset_rag_path", type=str) # path to the rag test set
     parser.add_argument("--verbose", default=False, action="store_true")  # print extra information
+    parser.add_argument("--tail_truncate_long_inputs", default=False, action="store_true")  # truncate from the tail (oldest history) instead of head when input exceeds token limit
 
     args = parser.parse_args()
 
     return args
 
-def get_filename(dataset, dataset_path = '', model_name = '',):
+def get_filename(dataset, dataset_path = '', model_name = '', tail_truncate_included = False):
     filename_args = "_".join(
         [
             model_name,
             dataset_path.split('/')[-1].split('.')[0],
+            "tail_truncate" if tail_truncate_included else "no_tail_truncate"
         ]
     )
     filename = f"./results/{dataset}/{filename_args}.jsonl"
     print(f"output file: {filename}")
     return filename
 
-def write_results(x, predictions, direction, writer, args, pred):
+def write_results(x, predictions, direction, writer, args):
 
     entity, relation, targets, time = x[0], x[1], x[2], x[3]
     example = {
@@ -100,8 +102,7 @@ def write_results(x, predictions, direction, writer, args, pred):
         "relation": relation,
         "targets": targets,
         "direction": direction,
-        "predictions": [x[0] for x in predictions],
-        "output_text": pred
+        "predictions": list(predictions),
     }
     writer.write(json.dumps(example) + "\n")
 
