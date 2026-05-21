@@ -4,23 +4,24 @@ import argparse
 import os
 import json
 
-def convert_txt_to_json(inputs, entities, test_ans, rule_ids = None):
+def convert_txt_to_json(inputs, entities, test_ans, rule_ids=None, use_ids=False):
     ins = get_ins()
-    test_ans = [x.strip().split('\t') for x in test_ans]
+    test_ans = [x.strip().split('\t') for x in test_ans if x.strip()]
     
     data_list = []
     for i in range(len(test_ans)):
         name_obj = test_ans[i][2]
+        target = name_obj  # already an ID string when use_ids (written by retrieve.py); entity name otherwise
         data = {
-            "context": inputs[i], # ins + inputs[i]+ "[/INST]"
-            "target": name_obj #str(entities[name_obj])+'.'+name_obj # top1: i+1: csv
+            "context": inputs[i],
+            "target": target
         }
         if rule_ids is not None:
             data["rule_ids"] = rule_ids[i] if i < len(rule_ids) else []
         data_list.append(data)
     return data_list
 
-def sample_data_training(dir_dataset, dir_of_answers, dir_of_entities2id, path_save, name_train, nums_sample = [16, 54, 256, 512, 1024], dir_of_rule_ids = ""):
+def sample_data_training(dir_dataset, dir_of_answers, dir_of_entities2id, path_save, name_train, nums_sample = [16, 54, 256, 512, 1024], dir_of_rule_ids = "", use_ids=False):
     content = just_read_txt(dir_dataset)
     inputs = content.split('\n\n')
     test_ans = read_txt_as_list(dir_of_answers)
@@ -40,7 +41,7 @@ def sample_data_training(dir_dataset, dir_of_answers, dir_of_entities2id, path_s
                 else:
                     rule_ids.append(json.loads(line))
 
-    data_list = convert_txt_to_json(inputs, entities, test_ans, rule_ids=rule_ids)
+    data_list = convert_txt_to_json(inputs, entities, test_ans, rule_ids=rule_ids, use_ids=use_ids)
     output_file_full = path_save+"/"+name_train+'.json'
     just_write_json(data_list, output_file_full, indent=4)
     print("saved as ", output_file_full)
@@ -66,6 +67,11 @@ def parser():
     parser.add_argument('--nums_sample', default="16", type=parse_int_list, 
                         help='The numbers of samples in a list of integers separated by commas')
     parser.add_argument("--dataset", type=str)
+    parser.add_argument(
+        "--use_ids",
+        action="store_true",
+        help="If set, write integer entity IDs as targets instead of entity names.",
+    )
     parsed = vars(parser.parse_args())
     return parsed
 
@@ -83,7 +89,8 @@ if __name__ == "__main__":
     print(path_save)
     nums_sample = parsed["nums_sample"]
     name_train = parsed["dataset"]
+    use_ids = parsed["use_ids"]
 
     if not os.path.exists(path_save):
             os.makedirs(path_save)
-    sample_data_training(dir_of_trainset, dir_of_answers, dir_of_entities2id, path_save, name_train, nums_sample, dir_of_rule_ids)
+    sample_data_training(dir_of_trainset, dir_of_answers, dir_of_entities2id, path_save, name_train, nums_sample, dir_of_rule_ids, use_ids=use_ids)
