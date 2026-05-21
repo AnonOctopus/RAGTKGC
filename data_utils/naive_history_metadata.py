@@ -23,10 +23,10 @@ class Fact:
 
 
 HISTORY_LINE_PATTERN = re.compile(
-    r"^\s*(?P<time>[^:]+):\s*\[(?P<sub>.*?),\s*(?P<rel>.*?),\s*(?P<obj>.*?)\]\s*$"
+    r"^\s*(?P<time>[^:]+):\s*\[(?P<sub>.*?), (?P<rel>.*?), (?P<obj>.*?)\]\s*$"
 )
 QUERY_LINE_PATTERN = re.compile(
-    r"^\s*(?P<time>[^:]+):\s*\[(?P<sub>.*?),\s*(?P<rel>.*?),\s*$"
+    r"^\s*(?P<time>[^:]+):\s*\[(?P<sub>.*?), (?P<rel>.*?),$"
 )
 
 
