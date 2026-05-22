@@ -15,5 +15,6 @@ wheels/
 .vscode/
 # Virtual environments
 .venv
-
+data
 .github
+models
