@@ -90,10 +90,41 @@ if __name__ == "__main__":
     check("lora_alpha follows 2*r", parsed.lora_alpha == 2 * parsed.lora_r,
           f"r={parsed.lora_r} alpha={parsed.lora_alpha}")
     modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-    check("LoraConfig builds with all linear layers",
-          LoraConfig(r=parsed.lora_r, lora_alpha=parsed.lora_alpha,
-                     lora_dropout=parsed.lora_dropout, target_modules=modules,
-                     bias="none", task_type="CAUSAL_LM") is not None)
+    config = LoraConfig(r=parsed.lora_r, lora_alpha=parsed.lora_alpha,
+                        lora_dropout=parsed.lora_dropout, target_modules=modules,
+                        bias="none", task_type="CAUSAL_LM")
+    check("LoraConfig builds with all linear layers", config is not None)
+
+    # Actually inject adapters, on a stand-in with the same layer names. PEFT
+    # picks an implementation per layer by walking a chain of dispatchers, and a
+    # broken optional dependency anywhere in that chain raises rather than being
+    # skipped — which only happens once the layers are real. Doing it on four
+    # tiny Linears costs nothing and fails here instead of after a 13 GB
+    # download. bfloat16 because the dispatch taken depends on the layer type,
+    # and a quantised model reaches a different branch than an unquantised one.
+    from peft import get_peft_model
+
+    class _Stub(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                setattr(self, name, torch.nn.Linear(8, 8, bias=False))
+
+        def forward(self, x):
+            return self.o_proj(self.v_proj(self.k_proj(self.q_proj(x))))
+
+        def prepare_inputs_for_generation(self, *a, **kw):
+            # PeftModelForCausalLM binds this at wrap time. Never called here.
+            raise NotImplementedError
+
+    try:
+        stub = get_peft_model(_Stub().to(torch.bfloat16), config)
+        adapters = sum(p.numel() for p in stub.parameters() if p.requires_grad)
+        check("adapters inject into bf16 Linear layers", adapters > 0,
+              f"{adapters} trainable adapter parameters")
+    except (ImportError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
+        check("adapters inject into bf16 Linear layers", False,
+              f"{type(exc).__name__}: {exc}")
 
     print("\n4. tokenizer")
     tok = AutoTokenizer.from_pretrained("TheBloke/Llama-2-7B-fp16")
