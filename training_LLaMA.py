@@ -121,6 +121,15 @@ def parser():
               "batch x accumulation constant to leave the optimiser unchanged."),
     )
     parser.add_argument(
+        "--per_device_eval_batch_size", type=int, default=None,
+        help=("Sequences per evaluation forward pass. Defaults to twice "
+              "--per_device_batch_size: evaluation runs under no_grad, so it "
+              "holds no activations for a backward pass and no optimiser state, "
+              "and fits a batch that training could not. Evaluation is a fixed "
+              "cost paid once per --eval_steps, so this is the cheapest way to "
+              "afford a larger validation set."),
+    )
+    parser.add_argument(
         "--gradient_accumulation_steps", type=int, default=8,
         help=("Forward passes per optimiser step. The product with "
               "--per_device_batch_size is the effective batch, which is what the "
@@ -630,8 +639,10 @@ if __name__ == "__main__":
     # pass would have been 62% of a 256-sample screening run, so the learning
     # rate under comparison would barely have been reached before it decayed.
     _batch, _accum = args.per_device_batch_size, args.gradient_accumulation_steps
+    _eval_batch = args.per_device_eval_batch_size or 2 * _batch
     logger.info("Effective batch: %d x %d = %d sequences per optimiser step",
                 _batch, _accum, _batch * _accum)
+    logger.info("Evaluation batch: %d sequences per forward pass", _eval_batch)
     _steps_per_epoch = math.ceil(len(tokenized_input) / (_batch * _accum))
     _total_steps = max(1, math.ceil(_steps_per_epoch * args.num_train_epochs))
     _warmup_steps = max(1, round(0.06 * _total_steps))
@@ -645,7 +656,7 @@ if __name__ == "__main__":
         # executable batch size found, reached zero", which does not. It also
         # halves silently, changing the effective batch without recording it.
         "per_device_train_batch_size": _batch,
-        "per_device_eval_batch_size": _batch,
+        "per_device_eval_batch_size": _eval_batch,
         "gradient_accumulation_steps": _accum,
         "learning_rate": args.learning_rate,
         "num_train_epochs": args.num_train_epochs,
