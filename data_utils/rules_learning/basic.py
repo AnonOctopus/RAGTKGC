@@ -1,6 +1,7 @@
 import json
 import csv
 import os
+import pickle
 import random
 from pathlib import Path
 import sys
@@ -160,6 +161,11 @@ def get_unique_quads_per_rels(dataset, path, period = 24, infer_from_type = Fals
         add_quad(reverse_quad, quads_all, quads, unique_nodes)
             
 
+    # zip pairs the two dicts by insertion order, not by key: the relation name
+    # comes from `quads` while the total count comes from `quads_all`. This is
+    # only correct because a head relation is always its own type-compatible
+    # body, so every key entering quads_all also enters quads at the same moment.
+    # If the admission test changes, iterate one dict and look the other up.
     for (k, v),(kk,vv) in zip(quads.items(),quads_all.items()):
 
         message = f'Relationship {id2rel[k % len(id2rel.keys())]} ({k}) has total quads - {len(vv)} and total unique quads - {len(v)}\n' # Heterogeneous rate: {heterogeneous_rate}%\n'
@@ -170,6 +176,57 @@ def get_unique_quads_per_rels(dataset, path, period = 24, infer_from_type = Fals
     f.close()
     rel2id_file.close()
     output.close()
+
+    return quads
+
+
+def get_unique_quads_per_rels_cached(dataset: str, path: str, period: int = 24,
+                                     infer_from_type: bool = False) -> dict:
+    """Admitted bodies per relation, reused from disk when already computed.
+
+    Args:
+        dataset: dataset name, e.g. "icews14".
+        path: quad file to read.
+        period: multiplier applied to each quad's timestamp. Names the node-mode
+            cache, because changing it changes every timestamp in the result.
+        infer_from_type: admit bodies by relation-signature compatibility
+            rather than by node identity. Also part of the cache name, because
+            it changes the type of the values, not only their content.
+
+    Returns:
+        dict: relation id to admitted bodies — a list of quad arrays when
+            infer_from_type is False, a set of relation ids when it is True.
+    """
+    # period scales the timestamp column, which the type mode never reads, so
+    # its result is invariant to period and the name leaves it out.
+    stamp = "type" if infer_from_type else f"p{period}_node"
+    cache_dir = f"../../data/processed_new/{dataset}/cache"
+    cache_path = os.path.join(cache_dir, f"unique_quads_{dataset}_{stamp}.pkl")
+
+    # pickle rather than JSON: the two modes return different value types
+    # (list of arrays, set of ints) and the keys are ints, none of which JSON
+    # represents. Delete the file to force a recomputation.
+    try:
+        with open(cache_path, "rb") as handle:
+            quads = pickle.load(handle)
+        print(f"unique_quads loaded from cache: {cache_path}")
+        return quads
+    except FileNotFoundError:
+        pass
+    except (OSError, pickle.UnpicklingError, EOFError) as exc:
+        # An interrupted write leaves a truncated file. Recomputing is always
+        # correct, so a damaged cache must not be fatal.
+        print(f"ignoring unreadable unique_quads cache ({exc}); recomputing")
+
+    quads = get_unique_quads_per_rels(dataset, path, period, infer_from_type)
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_path, "wb") as handle:
+            pickle.dump(quads, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"unique_quads cached to: {cache_path}")
+    except OSError as exc:
+        print(f"could not write unique_quads cache ({exc})")
 
     return quads
 

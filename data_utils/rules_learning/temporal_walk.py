@@ -10,8 +10,11 @@ class Temporal_Walk(object):
             learn_data (np.ndarray): data on which the rules should be learned
             inv_relation_id (dict): mapping of relation to inverse relation
             transition_distr (str): transition distribution
-                                    "unif" - uniform distribution
-                                    "exp"  - exponential distribution
+                                    "unif"       - uniform distribution
+                                    "exp"        - exponential, as published
+                                    "exp_scaled" - exponential over the gap
+                                                   divided by the timestamp
+                                                   spacing present in the data
 
         Returns:
             None
@@ -22,6 +25,13 @@ class Temporal_Walk(object):
         self.transition_distr = transition_distr
         self.neighbors = store_neighbors(learn_data)
         self.edges = store_edges(learn_data)
+
+        # Smallest spacing between distinct timestamps, used only by the
+        # "exp_scaled" transition. Derived from the data rather than hardcoded,
+        # so it is 1 — and therefore a no-op — on day-indexed input.
+        distinct_ts = np.unique(learn_data[:, 3])
+        gaps = np.diff(distinct_ts)
+        self.ts_granularity = int(gaps.min()) if len(gaps) else 1
         
 
     def sample_start_edge(self, rel_idx):
@@ -71,9 +81,16 @@ class Temporal_Walk(object):
 
         if self.transition_distr == "unif":
             next_edge = filtered_edges[np.random.choice(len(filtered_edges))]
-        elif self.transition_distr == "exp":
+        elif self.transition_distr in ("exp", "exp_scaled"):
             tss = filtered_edges[:, 3]
-            prob = np.exp(tss - cur_ts)
+            # "exp" is the published form, which assumes consecutive timestamps
+            # differ by about 1. On this repo's ts2id a day is 24, so a one-day
+            # gap already costs exp(-24): all mass lands on the newest timestamp
+            # and any gap past ~32 days underflows to zero, at which point the
+            # fallback below drops to uniform and ignores time altogether.
+            # "exp_scaled" divides the gap by the spacing actually present.
+            divisor = self.ts_granularity if self.transition_distr == "exp_scaled" else 1
+            prob = np.exp((tss - cur_ts) / divisor)
             try:
                 prob = prob / np.sum(prob)
                 next_edge = filtered_edges[

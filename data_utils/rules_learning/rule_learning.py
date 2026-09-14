@@ -20,7 +20,7 @@ def make_rule_id(rule):
     return hashlib.sha1(payload_str.encode("utf-8")).hexdigest()
 
 
-def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_pool_file_path=None, write_rule_ids_back=True):
+def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_pool_file_path=None, write_rule_ids_back=True, run_id="imported"):
     """
     Import an already computed rules JSON file and merge it into the common rule pool.
 
@@ -29,6 +29,7 @@ def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_po
         mining_alg (str): mining algorithm label to register in found_by/algorithm_stats
         rule_pool_file_path (str|None): optional explicit path for common_rule_pool.json
         write_rule_ids_back (bool): if True, persist generated rule_id/found_by back into rules file
+        run_id (str): identifier recorded in each rule's "runs" history
 
     Returns:
         dict: summary with counts and output paths
@@ -68,6 +69,7 @@ def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_po
                     "var_constraints": canonical["var_constraints"],
                     "found_by": [],
                     "algorithm_stats": {},
+                    "runs": [],
                 }
             else:
                 updated_rules += 1
@@ -75,11 +77,17 @@ def update_common_rule_pool_from_rules_file(rules_file_path, mining_alg, rule_po
             found_by = set(rule_pool[rule_id].get("found_by", []))
             found_by.add(mining_alg)
             rule_pool[rule_id]["found_by"] = sorted(found_by)
-            rule_pool[rule_id]["algorithm_stats"][mining_alg] = {
+            stats = {
                 "conf": rule.get("conf"),
                 "rule_supp": rule.get("rule_supp"),
                 "body_supp": rule.get("body_supp"),
             }
+            rule_pool[rule_id]["algorithm_stats"][mining_alg] = stats
+            # See Rule_Learner._update_common_rule_pool: algorithm_stats keeps
+            # only the latest run per algorithm, "runs" keeps the history.
+            rule_pool[rule_id].setdefault("runs", []).append(
+                dict(stats, run_id=run_id, mining_alg=mining_alg)
+            )
 
     with open(rule_pool_file_path, "w", encoding="utf-8") as fout:
         json.dump(rule_pool, fout, indent=2)
@@ -214,7 +222,17 @@ class Rule_Learner(object):
         with open(self.rule_pool_file, "w", encoding="utf-8") as fout:
             json.dump(rule_pool, fout, indent=2)
 
-    def _update_common_rule_pool(self):
+    def _update_common_rule_pool(self, run_id):
+        """
+        Merge this run's rules into the common rule pool.
+
+        Parameters:
+            run_id (str): identifier for this mining run, recorded in "runs"
+
+        Returns:
+            None
+        """
+
         rule_pool = self._load_common_rule_pool()
 
         for _, rel_rules in self.rules_dict.items():
@@ -230,16 +248,24 @@ class Rule_Learner(object):
                         "var_constraints": canonical["var_constraints"],
                         "found_by": [],
                         "algorithm_stats": {},
+                        "runs": [],
                     }
 
                 found_by = set(rule_pool[rule_id].get("found_by", []))
                 found_by.add(self.mining_alg)
                 rule_pool[rule_id]["found_by"] = sorted(found_by)
-                rule_pool[rule_id]["algorithm_stats"][self.mining_alg] = {
+                stats = {
                     "conf": rule.get("conf"),
                     "rule_supp": rule.get("rule_supp"),
                     "body_supp": rule.get("body_supp"),
                 }
+                rule_pool[rule_id]["algorithm_stats"][self.mining_alg] = stats
+                # algorithm_stats holds one entry per algorithm, so re-running an
+                # algorithm replaces what the previous run recorded. "runs" keeps
+                # the history; readers that select by algorithm are unaffected.
+                rule_pool[rule_id].setdefault("runs", []).append(
+                    dict(stats, run_id=run_id, mining_alg=self.mining_alg)
+                )
 
         self._save_common_rule_pool(rule_pool)
 
@@ -461,6 +487,33 @@ class Rule_Learner(object):
                 self.rules_dict[rel], key=lambda x: x["conf"], reverse=True
             )
 
+    def _rules_filename(self, dt, rule_lengths, num_walks, transition_distr, seed, ext):
+        """
+        Build a rule-bank filename recording only the parameters that apply.
+
+        Parameters:
+            dt (str): run timestamp, "ddmmyyHHMMSS"
+            rule_lengths (list): rule body lengths mined
+            num_walks (int): walks per relation; applies only when the algorithm walks
+            transition_distr (str): "unif" or "exp"; applies only when it walks
+            seed (int): RNG seed; applies only when the algorithm samples
+            ext (str): file extension without the leading dot
+
+        Returns:
+            str: the filename, with spaces removed
+        """
+
+        parts = [dt, self.mining_alg]
+        # exhaustive enumerates every type-compatible length-1 body, so it never
+        # walks or samples and none of the walk parameters describe it.
+        if self.mining_alg != "exhaustive":
+            parts.append("r{0}".format(rule_lengths))
+            # ragtkgc_no_walks makes one pass per unique quad, so num_walks is unused.
+            if self.mining_alg != "ragtkgc_no_walks":
+                parts.append("n{0}".format(num_walks))
+            parts += [str(transition_distr), "s{0}".format(seed)]
+        return ("_".join(parts) + "_rules.{0}".format(ext)).replace(" ", "")
+
     def save_rules(self, dt, rule_lengths, num_walks, transition_distr, seed):
         """
         Save all rules.
@@ -473,18 +526,18 @@ class Rule_Learner(object):
             seed (int): random seed
 
         Returns:
-            None
+            str: the bank filename written, relative to output_dir
         """
 
-        self._update_common_rule_pool()
+        self._update_common_rule_pool(dt)
 
         rules_dict = {int(k): v for k, v in self.rules_dict.items()}
-        filename = "{0}_r{1}_n{2}_{3}_s{4}_rules.json".format(
-            dt, rule_lengths, num_walks, transition_distr, seed
+        filename = self._rules_filename(
+            dt, rule_lengths, num_walks, transition_distr, seed, "json"
         )
-        filename = filename.replace(" ", "")
         with open(self.output_dir + filename, "w", encoding="utf-8") as fout:
             json.dump(rules_dict, fout)
+        return filename
 
     def save_rules_verbalized(
         self, dt, rule_lengths, num_walks, transition_distr, seed
@@ -508,11 +561,9 @@ class Rule_Learner(object):
             for rule in self.rules_dict[rel]:
                 rules_str += verbalize_rule(rule, self.id2relation) + "\n"
 
-        filename = "{0}_r{1}_n{2}_{3}_s{4}_rules.txt".format(
-        # filename = "YAGO_rules.txt".format(
-            dt, rule_lengths, num_walks, transition_distr, seed
+        filename = self._rules_filename(
+            dt, rule_lengths, num_walks, transition_distr, seed, "txt"
         )
-        filename = filename.replace(" ", "")
         with open(self.output_dir + filename, "w", encoding="utf-8") as fout:
             fout.write(rules_str)
 

@@ -1,151 +1,135 @@
-import json
-import math
-import numpy as np
-import torch
+"""Decoding helpers: turn one query prompt into a ranked candidate list."""
+
+from utils import normalize_entity
 
 
-# function to decode permutations of logits
+def max_target_tokens(test_set, tokenizer, margin=8):
+    """Token budget for generation, from the longest target in this run.
 
-def permute(tokenizer, scores, cur_step, max_step, cur_seq, seqs, dec_cand, end_char):
-    if cur_step == max_step or cur_step >= len(scores) or (len(cur_seq) > 0 and any(x in cur_seq[-1]["token"] for x in end_char)):
-        _cur_seq = cur_seq[:-1].copy() if any(x in cur_seq[-1]["token"] for x in end_char) else cur_seq.copy()
-        normalized_logit = (
-            sum([x["logit"] for x in _cur_seq]) / len(_cur_seq) if len(_cur_seq) > 0 else -math.inf
-        )
-        seqs.append(
-            {
-                "tokens": [x["token"] for x in _cur_seq],
-                "text": "".join([x["token"] for x in _cur_seq]).strip(),
-                "probability": normalized_logit,
-            }
-        )
-        return
-    logits = scores[cur_step] 
-    logits_indices = torch.argsort(logits, dim=-1, descending=True)
-    for tok in logits_indices[0][:dec_cand]:
-        #print(tok)
-        cur_seq.append({"token": tokenizer.decode(tok), "logit": logits[0][tok].item()})
-        permute(tokenizer, scores, cur_step + 1, max_step, cur_seq, seqs, dec_cand, end_char)
-        cur_seq.pop()
+    Args:
+        test_set: the loaded split; each row carries a 'target' string.
+        tokenizer: the tokenizer the model will decode with.
+        margin: slack added to the longest target. Beam search stops at EOS,
+            so an over-generous budget is nearly free, while too small a one
+            truncates candidates and can cut a long name down onto a shorter
+            true one, scoring a hit the model never proposed.
+
+    Returns:
+        int: max_new_tokens to pass to generate.
+
+    Raises:
+        ValueError: the split is empty.
+        KeyError: a row has no 'target' field.
+    """
+    if len(test_set) == 0:
+        raise ValueError("Cannot size the generation budget from an empty split.")
+    longest = max(len(tokenizer(row['target']).input_ids) for row in test_set)
+    return longest + margin
 
 
-def deduplicate(x):  # NOTE: assumes a sorted list based on probability
-    f = {}
-    z = []
-    for y in x:
-        if y[0] in f:
+def _clean(text):
+    """Normalise one decoded candidate to a bare entity string.
+
+    Args:
+        text: the decoded continuation, special tokens already skipped.
+
+    Returns:
+        str: the candidate entity name, possibly empty.
+    """
+    # Only the first line: a decoder-only model given a history-completion
+    # prompt predicts the object and then continues with the next fact line.
+    # Targets never contain a newline, so this is inert elsewhere.
+    return text.split('\n')[0].replace(']', '').replace('</s>', '').strip()
+
+
+def beam_candidates(tokenizer, model, inputs, max_new_tokens, num_beams,
+                    prompt_len=0, length_penalty=1.0):
+    """Decode a ranked candidate list with beam search.
+
+    Args:
+        tokenizer: tokenizer matching the model.
+        model: a generation-capable model in eval mode.
+        inputs: tokenizer output, already moved to the model's device.
+        max_new_tokens: cap on generated tokens.
+        num_beams: beam width; also how many sequences are returned.
+        prompt_len: tokens to drop from the front of every output sequence.
+            0 for encoder-decoder models; len(inputs['input_ids'][0]) for
+            decoder-only ones, whose output repeats the prompt.
+        length_penalty: exponent the sequence log-probability is divided by the
+            token count with, deciding how candidates of different length
+            compare. 1.0 normalises fully; 0.0 not at all; above 1.0 rewards
+            longer candidates.
+
+    Returns:
+        list[str]: candidates best first, empties and duplicates removed, at
+            most num_beams long.
+    """
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        num_beams=num_beams,
+        num_return_sequences=num_beams,
+        length_penalty=length_penalty,
+        early_stopping=True,
+    )
+    texts = [_clean(tokenizer.decode(seq[prompt_len:], skip_special_tokens=True))
+             for seq in outputs]
+    # Beam search returns sequences best first, and cleaning can collapse two
+    # of them onto one candidate. Deduplicate on the form scoring compares, not
+    # on the raw string: two spellings that score as the same entity would
+    # otherwise both survive and one would consume a rank above the target.
+    # The first — best-scoring — spelling of each is the one kept.
+    seen = set()
+    candidates = []
+    for text in texts:
+        key = normalize_entity(text)
+        if not key or key in seen:
             continue
-        f[y[0]] = True
-        z.append(y)
-    return z
+        seen.add(key)
+        candidates.append(text)
+    return candidates
 
 
-def parse_results(results):
-    #print('results',results)
-    logprobs = [(x["text"], x["probability"]) for x in results]
-    sorted_logprobs = sorted(logprobs, key=lambda tup: tup[1], reverse=True)
-    dedup_sorted_logprobs = deduplicate(sorted_logprobs)
+def predict(tokenizer, model, prompt, args, max_new_tokens):
+    """Rank candidate objects for one query prompt.
 
-    probs = [x[1] for x in dedup_sorted_logprobs]
-    softmax_probs = np.exp(probs) / np.sum(np.exp(probs), axis=0)
+    Args:
+        tokenizer: tokenizer matching the model.
+        model: the fine-tuned model in eval mode.
+        prompt: the full input text, already truncated by the caller.
+        args: parsed arguments; base_model, num_beams, length_penalty and
+            verbose are read.
+        max_new_tokens: generation budget, from max_target_tokens.
 
-    to_return = [(x[0], p) for x, p in zip(dedup_sorted_logprobs, softmax_probs)]
-    #print('to return', to_return)
-    return to_return
+    Returns:
+        list[str]: candidates best first, deduplicated.
 
-
-def predict(tokenizer, model, prompt, args, output_text = False):
-    
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    Raises:
+        ValueError: args.base_model is not a supported local model.
+    """
+    # Only when the tokenizer has no pad token of its own. LLaMA has none and
+    # needs eos standing in; T5 has <pad> and must keep it, or batched encoder
+    # inputs get padded with </s>.
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    maxl = 45 # default; the max length of the output depends on the model and dataset; it is the maximum number of tokens that a target can have 
 
-    if args.dataset == 'icews18':
-        if args.base_model == 'TheBloke/Llama-2-7B-fp16': maxl = 35
-        if args.base_model == 'google/flan-t5-small': maxl = 45
-    
-    if args.dataset == 'icews14':
-        if args.base_model == 'TheBloke/Llama-2-7B-fp16': maxl = 26
-        if args.base_model == 'google/flan-t5-small': maxl = 42
-
+    # The only difference between the two model families here: a decoder-only
+    # model's output sequence starts with the prompt it was given.
     if args.base_model == 'google/flan-t5-small':
-
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=maxl,
-            return_dict_in_generate=True,
-            output_scores=True,
-            renormalize_logits=True,
-        )
-
-
-        results = []
-
-        permute(
-                tokenizer,
-                outputs.scores,
-                0,
-                maxl,
-                [],
-                results,
-                1, # nr of logits to consider from each output score
-                ["]","</s>"], # tokens when to stop decoding
-                )
-        
-        results = list(sorted(results, key=lambda x: x["probability"], reverse=True))[:10] # keep the first 10 candidates
-        
-        if args.verbose:
-                    
-            for x in results:
-                print(
-                    f'| {json.dumps(x["tokens"]):30s} | {x["text"]:10s} | {x["probability"]:.4f} | {np.exp(x["probability"]):.2%}'
-                    )
-
-        # Return a list of plain prediction strings (text only, no probability tuples)
-        predictions = [x[0] for x in parse_results(results)]
-        
-        # method for decoding predictions for the second approach of calculating the metrics. Not reported
-        # if used, make sure to also return pred and modify in run_hf.py to save it and pass it to write results; also, modify in utils.py (update_metrics) to calculate them using these predictions
-        '''
-        pred = ['','','']
-        probability = [0,0,0]
-
-        for i in range(len(outputs['scores'])):
-          logits = outputs['scores'][i]
-          logits_indices = torch.argsort(logits, dim=-1, descending=True)
-          logits_values = torch.sort(logits, dim=-1, descending=True)
-          for j in range(3):
-    
-            probability[j] += logits_values[0][0][j]
-            pred[j] += tokenizer.decode(logits_indices[0][j])
-
-
-        for i in range(len(probability)):
-
-          probability[i] = np.exp(probability[i].item()/len(outputs['scores']))
-        '''
-    
+        prompt_len = 0
     elif args.base_model == 'TheBloke/Llama-2-7B-fp16':
+        prompt_len = len(inputs['input_ids'][0])
+    else:
+        raise ValueError(f"predict() does not support base_model {args.base_model!r}")
 
-        beam_outputs = model.generate(
-            **inputs,
-            max_new_tokens=maxl,
-            num_beams=3,
-            num_return_sequences=3,
-            early_stopping=True,
-        )
+    predictions = beam_candidates(
+        tokenizer, model, inputs, max_new_tokens, args.num_beams, prompt_len,
+        args.length_penalty,
+    )
 
-    
-        predictions = []
-        for i, beam_output in enumerate(beam_outputs):
-            beam_pred = tokenizer.decode(beam_output[len(inputs['input_ids'][0]):], skip_special_tokens=True).replace(']','').replace('</s>','').strip()
-            
-            if 'gtkg' in args.finetuned_model:
-                predictions.append(beam_pred.split('\n')[0].strip()) # needs an extra processing step, as this variants predict more than the target
-            else:
-                predictions.append(beam_pred)
-
-            if args.verbose:
-                print("{}: {}".format(i, beam_pred))
+    if args.verbose:
+        for i, p in enumerate(predictions):
+            print(f"  {i + 1}: {p}")
 
     return predictions

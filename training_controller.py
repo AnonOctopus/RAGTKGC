@@ -233,7 +233,7 @@ class TrainingControllerCallback(TrainerCallback):
             self._patience_counter = 0   # fresh window after reduction
             logger.warning(
                 f"[TrainingController] REDUCE_LR #{self._lr_reduction_count}"
-                f"/{self.max_lr_reductions}: LR → {new_lr:.3e}"
+                f"/{self.max_lr_reductions}: LR -> {new_lr:.3e}"
             )
             return self.REDUCE_LR
 
@@ -416,6 +416,8 @@ class TrainingControllerCallback(TrainerCallback):
                 f"  step={e['step']:>8}  raw={e['raw_loss']:.6f}  "
                 f"ema={e['ema_loss']:.6f}  lr={e['lr']:.3e}  "
                 f"patience={e['patience']}  reductions={e['lr_reductions']}  "
-                f"→ {e['decision']}"
+                # ASCII only: this string is printed, and a Windows console
+                # encodes stdout as cp1252, which cannot represent an arrow.
+                f"-> {e['decision']}"
             )
         return "\n".join(lines)

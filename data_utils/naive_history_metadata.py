@@ -1,3 +1,38 @@
+"""Build naive subject-history metadata for temporal KG quads and report stats.
+
+Big picture
+-----------
+Given a target split (train/valid/test) of a temporal knowledge graph, this
+script answers, for every query quad ``(sub, rel, ?obj, time)``: *was the true
+object already mentioned in the subject's prior history, and how recently?*
+It emits one JSONL row of per-quad metadata plus an aggregate summary JSON.
+
+There are two ways to obtain the per-quad "history":
+
+1. RAW mode (default): rebuild history from the original ``train/valid/test.txt``
+   quad files. See ``read_quads`` -> ``build_subject_index`` -> ``compute_history``.
+2. PRECOMPUTED mode (``--precomputed_json``): reuse already-built history
+   prompts (list of ``{context, target}``) produced by the history-modeling
+   pipeline. The textual ``context`` is re-parsed back into ``Fact`` objects via
+   ``parse_precomputed_context`` using the two regexes below.
+
+Either way the per-quad ``rows`` (each holding a ``history`` list + query info)
+flow into ``compute_and_write_stats``, which computes mention statistics
+(target present? closest/farthest position? within last-N? optional rule-usage
+and prediction-correctness breakdowns) and writes the outputs.
+
+Two standalone comparison modes short-circuit ``main`` and ignore the dataset:
+``--compare_summary_a/b`` (rule-usage overlap between two summaries) and
+``--compare_results_a/b`` (correct-prediction overlap between two results files).
+
+Memory note
+-----------
+PRECOMPUTED mode calls ``json.load`` on the whole file and materializes every
+row's history at once. The ``train`` files are hundreds of MB on disk and
+expand to several GB of Python objects, which can exhaust RAM. Use
+``--max_quads`` to test on a slice, or run on valid/test (smaller) first.
+"""
+
 import argparse
 import json
 import os
@@ -5,9 +40,13 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from itertools import islice
+from typing import Dict, Iterable, Iterator, List, Optional
 
+import ijson
 from tqdm import tqdm
+
+from conf_stats import conf_stats, load_rule_conf_map
 
 
 @dataclass
@@ -46,9 +85,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include_indirect",
         action="store_true",
-        default=True,
+        default=False,
         help=(
-            "If set, also include indirect facts where the query subject appears as object (X, r, subject, t)."
+            "If set, also include indirect ('inverse') facts where the query subject appears as "
+            "the object of a fact (X, r, subject, t). Off by default; pass --include_indirect to enable. "
+            "Only affects raw mode."
         ),
     )
     parser.add_argument(
@@ -59,11 +100,14 @@ def parse_args() -> argparse.Namespace:
         help="Window sizes n for 'target mentioned in n most recent history facts'",
     )
     parser.add_argument(
-        "--test_source",
+        "--history_source",
         choices=["all", "split"],
         default="all",
         help=(
-            "When split=test: use all train+valid+test facts as source ('all') or only test ('split')."
+            "Where history facts come from in raw mode. 'all' (default): cumulative history "
+            "honoring the chronological train < valid < test order, i.e. all splits up to and "
+            "including the target split (train->train, valid->train+valid, test->train+valid+test). "
+            "'split': restrict history to the target split only. Ignored in precomputed mode."
         ),
     )
     parser.add_argument(
@@ -95,7 +139,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to precomputed history JSON (list of {context, target}) such as history_modeling_train/*.json. "
+            "Path to precomputed history JSON (list of {context, target}) such as "
+            "<split>_inv_n50/json/<dataset>_<mining>_inv_n50_<split>.json. "
             "If provided, statistics are computed from these contexts instead of rebuilding history from raw splits."
         ),
     )
@@ -167,6 +212,22 @@ def parse_args() -> argparse.Namespace:
             "Optional model results JSONL aligned by row order with processed quads; "
             "must contain 'targets' and 'predictions' fields for correctness metrics."
         ),
+    )
+    parser.add_argument(
+        "--rule_pool",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to common_rule_pool.json. When given (with --rules_algorithm), "
+            "each entry in rules_usage_pct_among_all_facts becomes {usage_pct, conf} and an "
+            "aggregate rule_confidence_stats is added to the summary."
+        ),
+    )
+    parser.add_argument(
+        "--rules_algorithm",
+        type=str,
+        default=None,
+        help="Mining algorithm whose conf to read from the rule pool, e.g. exhaustive.",
     )
     return parser.parse_args()
 
@@ -261,6 +322,18 @@ def _prediction_bucket_summary(bucket: Dict[str, object], recent_n: List[int]) -
     }
 
 
+def _usage_pct_value(value) -> float:
+    """Read a usage percentage that may be a bare float or a {usage_pct, conf} dict.
+
+    The summary's ``rules_usage_pct_among_all_facts`` entries are bare percents by
+    default but become ``{"usage_pct": ..., "conf": ...}`` when built with
+    ``--rule_pool``. This tolerates both so comparisons work across summary versions.
+    """
+    if isinstance(value, dict):
+        return float(value.get("usage_pct", 0.0) or 0.0)
+    return float(value or 0.0)
+
+
 def compare_rule_usage_summaries(args: argparse.Namespace) -> None:
     with open(args.compare_summary_a, "r", encoding="utf-8") as fa:
         summary_a = json.load(fa)
@@ -276,6 +349,9 @@ def compare_rule_usage_summaries(args: argparse.Namespace) -> None:
         rules_pct_a = {}
     if not isinstance(rules_pct_b, dict):
         rules_pct_b = {}
+    # Normalize to {rule_id: float} so both summary shapes compare uniformly.
+    rules_pct_a = {rid: _usage_pct_value(v) for rid, v in rules_pct_a.items()}
+    rules_pct_b = {rid: _usage_pct_value(v) for rid, v in rules_pct_b.items()}
 
     rules_a = set(str(x) for x in rules_pct_a.keys())
     rules_b = set(str(x) for x in rules_pct_b.keys())
@@ -475,6 +551,12 @@ def compare_results_correct_predictions(args: argparse.Namespace) -> None:
 
 
 def parse_time_to_int(raw_time: str) -> float:
+    """Coerce a timestamp string to a sortable float.
+
+    Tries, in order: integer id (e.g. ``"91"``), decimal (e.g. ``"91.0"`` from
+    precomputed contexts), then ISO date (e.g. ``"2014-01-01"`` -> ordinal day).
+    Raises ``ValueError`` if none match.
+    """
     raw_time = raw_time.strip()
     try:
         return float(int(raw_time))
@@ -496,6 +578,11 @@ def parse_time_to_int(raw_time: str) -> float:
 
 
 def read_quads(path: str, split_name: str) -> List[Fact]:
+    """RAW mode: read a tab-separated ``sub\\trel\\tobj\\ttime`` quad file into Facts.
+
+    Lines with fewer than 4 columns are skipped. ``source_index`` records the
+    original line order, used as a tie-breaker when sorting by time.
+    """
     facts: List[Fact] = []
     with open(path, "r", encoding="utf-8") as f_in:
         for idx, line in enumerate(f_in):
@@ -522,6 +609,14 @@ def read_quads(path: str, split_name: str) -> List[Fact]:
 
 
 def parse_precomputed_context(context_text: str) -> Dict[str, object]:
+    """PRECOMPUTED mode: re-parse a textual history prompt back into structured data.
+
+    The ``context`` string is line-based: history lines look like
+    ``time: [sub, rel, obj]`` (-> a ``Fact``), and the final query line looks
+    like ``time: [sub, rel,`` (the object is masked). Returns the recovered
+    history (sorted newest-first) plus the query's sub/rel/time. Lines that
+    match neither regex are ignored.
+    """
     lines = [line.strip() for line in context_text.split("\n") if line.strip()]
     history: List[Fact] = []
     query_sub: Optional[str] = None
@@ -566,15 +661,37 @@ def parse_precomputed_context(context_text: str) -> Dict[str, object]:
     }
 
 
-def choose_source_splits(split: str, test_source: str) -> List[str]:
-    if split == "test" and test_source == "all":
-        return ["train", "valid", "test"]
-    return [split]
+SPLIT_ORDER = ["train", "valid", "test"]
+
+
+def choose_source_splits(split: str, history_source: str) -> List[str]:
+    """Pick which raw splits supply history facts for the target split.
+
+    The dataset is split chronologically (train < valid < test in time), so the
+    natural history source for a split is every split up to and including it:
+    train->[train], valid->[train, valid], test->[train, valid, test]. This
+    mirrors retrieve.py, which loads the full corpus (all_facts.txt) and lets the
+    strict ``time < query_time`` filter keep only earlier facts.
+
+    ``history_source='split'`` opts out and restricts history to the target
+    split alone.
+    """
+    if history_source == "split":
+        return [split]
+    return SPLIT_ORDER[: SPLIT_ORDER.index(split) + 1]
 
 
 def build_subject_index(
     source_facts: Iterable[Fact], include_indirect: bool
 ) -> Dict[str, List[Fact]]:
+    """RAW mode: group source facts into per-subject history pools (newest first).
+
+    Each fact is added to its subject's pool (direct history). When
+    ``include_indirect`` is set, the same fact is also added to its *object's*
+    pool (so a query about that entity can see facts where it appears as object),
+    flagged ``is_indirect=True``. Pools are sorted by time descending so the
+    "closest mention" is at index 0.
+    """
     by_subject: Dict[str, List[Fact]] = defaultdict(list)
 
     for fact in source_facts:
@@ -607,6 +724,11 @@ def build_subject_index(
 
 
 def compute_history(history_pool: List[Fact], query_time: int) -> List[Fact]:
+    """RAW mode: keep only pool facts strictly earlier than the query time.
+
+    Mirrors the retriever's temporal filtering so metrics match production
+    behaviour (no leakage of same-time or future facts into the history).
+    """
     # Retriever-style temporal filtering: strictly earlier only.
     return [fact for fact in history_pool if fact.time_value < query_time]
 
@@ -655,13 +777,29 @@ def default_output_paths(args: argparse.Namespace) -> Dict[str, str]:
 
 
 def compute_and_write_stats(
-    rows: List[Dict[str, object]],
+    rows: Iterable[Dict[str, object]],
     args: argparse.Namespace,
     output_jsonl: str,
     output_summary: str,
     source_splits: Optional[List[str]] = None,
     prediction_correctness: Optional[List[bool]] = None,
+    total_rows: Optional[int] = None,
+    rule_to_conf: Optional[Dict[str, float]] = None,
 ) -> None:
+    """Core stats engine shared by both modes.
+
+    ``rows`` is consumed lazily (a generator/iterator is fine) in a single
+    forward pass, so memory stays O(one row + accumulators) regardless of
+    dataset size. ``total_rows`` is only used to render the tqdm progress bar
+    when the count is known up front (raw mode); pass ``None`` when streaming.
+
+    For each row, finds every position in ``history`` where the true object is
+    mentioned (as obj or sub), and derives: has-target, mention count,
+    closest/farthest mention index, and within-last-N hits for each N in
+    ``--recent_n``. Writes one metadata line per quad to ``output_jsonl`` and an
+    aggregate ``output_summary``. Optionally splits stats by prediction
+    correctness and tallies rule-id usage when ``rule_ids`` are present.
+    """
     os.makedirs(os.path.dirname(output_jsonl), exist_ok=True)
     os.makedirs(os.path.dirname(output_summary), exist_ok=True)
 
@@ -680,7 +818,7 @@ def compute_and_write_stats(
     pred_wrong_bucket = _init_prediction_bucket(args.recent_n)
 
     with open(output_jsonl, "w", encoding="utf-8") as fout:
-        for q_idx, row in enumerate(tqdm(rows, desc="Computing history metadata")):
+        for q_idx, row in enumerate(tqdm(rows, total=total_rows, desc="Computing history metadata")):
             total += 1
             history: List[Fact] = row["history"]
             query_obj = row["query_obj"]
@@ -718,6 +856,12 @@ def compute_and_write_stats(
                     within_n_pos_sums[n] += mention_positions[0]
 
             if prediction_correctness is not None:
+                if q_idx >= len(prediction_correctness):
+                    raise ValueError(
+                        "Fewer predictions than quads: predictions cover "
+                        f"{len(prediction_correctness)} rows but quad #{q_idx} was reached. "
+                        f"Check that --results_jsonl aligns with {args.precomputed_json or args.split}."
+                    )
                 is_correct = prediction_correctness[q_idx]
                 bucket = pred_correct_bucket if is_correct else pred_wrong_bucket
                 bucket["count"] += 1
@@ -750,6 +894,12 @@ def compute_and_write_stats(
                 meta["rule_ids"] = query_rule_ids
             fout.write(json.dumps(meta) + "\n")
 
+    if prediction_correctness is not None and len(prediction_correctness) != total:
+        raise ValueError(
+            "Mismatch between quads and predictions: "
+            f"{total} quads vs {len(prediction_correctness)} predictions from {args.results_jsonl}"
+        )
+
     def safe_avg(values: List[float]) -> Optional[float]:
         return (sum(values) / len(values)) if values else None
 
@@ -758,7 +908,7 @@ def compute_and_write_stats(
         "split": args.split,
         "include_indirect": args.include_indirect,
         "precomputed_json": args.precomputed_json,
-        "test_source": args.test_source,
+        "history_source": args.history_source,
         "source_splits": source_splits,
         "num_target_quads": total,
         "num_quads_with_nonempty_history": nonempty_history,
@@ -802,7 +952,20 @@ def compute_and_write_stats(
             for rid in rule_usage_counts.keys()
         ]
         usage_pct_items.sort(key=lambda x: (-x[1], x[0]))
-        summary["rules_usage_pct_among_all_facts"] = {rid: pct for rid, pct in usage_pct_items}
+        if rule_to_conf is not None:
+            # Attach per-rule confidence; null when the rule_id is absent for this
+            # algorithm. Aggregate over the rules actually used (one conf per rule).
+            summary["rules_usage_pct_among_all_facts"] = {
+                rid: {"usage_pct": pct, "conf": rule_to_conf.get(rid)}
+                for rid, pct in usage_pct_items
+            }
+            used_confs = [rule_to_conf[rid] for rid, _ in usage_pct_items if rid in rule_to_conf]
+            summary["num_used_rules_missing_conf"] = sum(
+                1 for rid, _ in usage_pct_items if rid not in rule_to_conf
+            )
+            summary["rule_confidence_stats"] = conf_stats(used_confs)
+        else:
+            summary["rules_usage_pct_among_all_facts"] = {rid: pct for rid, pct in usage_pct_items}
 
     with open(output_summary, "w", encoding="utf-8") as fsum:
         json.dump(summary, fsum, indent=2)
@@ -811,7 +974,59 @@ def compute_and_write_stats(
     print("Saved summary to:", output_summary)
 
 
+def iter_precomputed_rows(
+    path: str, split: str, max_quads: Optional[int] = None
+) -> Iterator[Dict[str, object]]:
+    """PRECOMPUTED mode: stream ``{context, target}`` items straight off disk.
+
+    Uses ``ijson`` to walk the top-level JSON array one element at a time, so the
+    whole (potentially hundreds-of-MB) file is never resident in memory. Each
+    item is parsed into a row dict on demand and yielded; nothing is retained
+    between iterations.
+    """
+    with open(path, "rb") as fin:
+        items = ijson.items(fin, "item")
+        if max_quads is not None:
+            items = islice(items, max_quads)
+        for item in items:
+            parsed = parse_precomputed_context(item.get("context", ""))
+            yield {
+                "history": parsed["history"],
+                "query_sub": parsed["query_sub"],
+                "query_rel": parsed["query_rel"],
+                "query_time_raw": parsed["query_time_raw"],
+                "query_time_value": parsed["query_time_value"],
+                "query_obj": item.get("target"),
+                "rule_ids": item.get("rule_ids", None),
+                "query_split": split,
+            }
+
+
+def iter_raw_rows(
+    target_facts: Iterable[Fact], by_subject: Dict[str, List[Fact]], split: str
+) -> Iterator[Dict[str, object]]:
+    """RAW mode: yield one row per target quad, computing its history lazily."""
+    for query in target_facts:
+        history = compute_history(by_subject.get(query.sub, []), query.time_value)
+        yield {
+            "history": history,
+            "query_sub": query.sub,
+            "query_rel": query.rel,
+            "query_time_raw": query.time_raw,
+            "query_time_value": query.time_value,
+            "query_obj": query.obj,
+            "query_split": split,
+        }
+
+
 def main() -> None:
+    """Dispatch to the requested mode.
+
+    Order of checks: (1) results-correctness comparison, (2) summary rule-usage
+    comparison, then the metadata build itself in either PRECOMPUTED mode
+    (``--precomputed_json``) or RAW mode (rebuild from ``base_data_dir`` splits).
+    All metadata paths converge on ``compute_and_write_stats``.
+    """
     args = parse_args()
 
     if args.compare_results_a or args.compare_results_b:
@@ -837,35 +1052,16 @@ def main() -> None:
     if args.results_jsonl:
         prediction_correctness = load_prediction_correctness(args.results_jsonl, args.max_quads)
 
+    rule_to_conf: Optional[Dict[str, float]] = None
+    if args.rule_pool:
+        if not args.rules_algorithm:
+            raise ValueError("--rule_pool requires --rules_algorithm to pick which conf to use.")
+        rule_to_conf, _ = load_rule_conf_map(args.rule_pool, args.rules_algorithm)
+
     if args.precomputed_json:
-        with open(args.precomputed_json, "r", encoding="utf-8") as fin:
-            precomputed_rows = json.load(fin)
-
-        if args.max_quads is not None:
-            precomputed_rows = precomputed_rows[: args.max_quads]
-
-        rows: List[Dict[str, object]] = []
-        for item in precomputed_rows:
-            parsed = parse_precomputed_context(item.get("context", ""))
-            rows.append(
-                {
-                    "history": parsed["history"],
-                    "query_sub": parsed["query_sub"],
-                    "query_rel": parsed["query_rel"],
-                    "query_time_raw": parsed["query_time_raw"],
-                    "query_time_value": parsed["query_time_value"],
-                    "query_obj": item.get("target"),
-                    "rule_ids": item.get("rule_ids", None),
-                    "query_split": args.split,
-                }
-            )
-
-        if prediction_correctness is not None and len(prediction_correctness) != len(rows):
-            raise ValueError(
-                "Mismatch between rows and predictions: "
-                f"{len(rows)} rows vs {len(prediction_correctness)} predictions from {args.results_jsonl}"
-            )
-
+        # Stream the array; rows are consumed one at a time (length is validated
+        # against predictions inside compute_and_write_stats after the pass).
+        rows = iter_precomputed_rows(args.precomputed_json, args.split, args.max_quads)
         compute_and_write_stats(
             rows=rows,
             args=args,
@@ -873,11 +1069,13 @@ def main() -> None:
             output_summary=output_summary,
             source_splits=None,
             prediction_correctness=prediction_correctness,
+            total_rows=None,
+            rule_to_conf=rule_to_conf,
         )
         return
 
     dataset_dir = os.path.join(args.base_data_dir, args.dataset)
-    source_splits = choose_source_splits(args.split, args.test_source)
+    source_splits = choose_source_splits(args.split, args.history_source)
 
     target_path = os.path.join(dataset_dir, f"{args.split}.txt")
     target_facts = read_quads(target_path, args.split)
@@ -891,28 +1089,7 @@ def main() -> None:
 
     by_subject = build_subject_index(source_facts, args.include_indirect)
 
-    rows = []
-    for query in target_facts:
-        history_pool = by_subject.get(query.sub, [])
-        history = compute_history(history_pool, query.time_value)
-        rows.append(
-            {
-                "history": history,
-                "query_sub": query.sub,
-                "query_rel": query.rel,
-                "query_time_raw": query.time_raw,
-                "query_time_value": query.time_value,
-                "query_obj": query.obj,
-                "query_split": args.split,
-            }
-        )
-
-    if prediction_correctness is not None and len(prediction_correctness) != len(rows):
-        raise ValueError(
-            "Mismatch between rows and predictions: "
-            f"{len(rows)} rows vs {len(prediction_correctness)} predictions from {args.results_jsonl}"
-        )
-
+    rows = iter_raw_rows(target_facts, by_subject, args.split)
     compute_and_write_stats(
         rows=rows,
         args=args,
@@ -920,6 +1097,8 @@ def main() -> None:
         output_summary=output_summary,
         source_splits=source_splits,
         prediction_correctness=prediction_correctness,
+        total_rows=len(target_facts),
+        rule_to_conf=rule_to_conf,
     )
 
 

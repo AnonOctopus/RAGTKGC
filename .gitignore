@@ -18,3 +18,4 @@ wheels/
 data
 .github
 models
+logs
