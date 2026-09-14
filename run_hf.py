@@ -27,18 +27,22 @@ tf_logging.set_verbosity_error()
 # Token-length helpers
 # ---------------------------------------------------------------------------
 
-def get_token_limit(tokenizer_obj):
-    """Read the max input length in tokens from a tokenizer.
+def get_token_limit(tokenizer_obj, model_config=None):
+    """Read the max input length in tokens for a model.
 
     Args:
         tokenizer_obj: a loaded tokenizer.
+        model_config: the model's config, or None. Consulted only when the
+            tokenizer carries no usable value, and only for a decoder whose
+            positional embeddings impose a hard ceiling.
 
     Returns:
-        tuple[int, str]: the limit, and which attribute it came from —
-            "max_len_single_sentence" or "model_max_length".
+        tuple[int, str]: the limit, and where it came from —
+            "max_len_single_sentence", "model_max_length", or
+            "config.max_position_embeddings".
 
     Raises:
-        ValueError: neither attribute holds a usable value.
+        ValueError: no source holds a usable value.
     """
     # Above 1_000_000 means unspecified: transformers stores 1e30 when a
     # tokenizer config omits the field.
@@ -46,7 +50,16 @@ def get_token_limit(tokenizer_obj):
         value = getattr(tokenizer_obj, source, None)
         if value is not None and 0 < value <= 1_000_000:
             return int(value), source
-    raise ValueError("No usable max input length on the tokenizer.")
+
+    # A tokenizer's length is metadata and is often absent or a sentinel; the
+    # positional embedding count is the architecture's real wall. For Llama-2
+    # that is the 4096-token RoPE limit, beyond which generation is undefined
+    # rather than merely degraded.
+    value = getattr(model_config, "max_position_embeddings", None)
+    if value is not None and 0 < value <= 1_000_000:
+        return int(value), "config.max_position_embeddings"
+
+    raise ValueError("No usable max input length on the tokenizer or config.")
 
 
 def init_length_stats():
@@ -210,7 +223,8 @@ if __name__ == "__main__":
         model = PeftModelForCausalLM.from_pretrained(
             training_model, models_path + args.finetuned_model
         )
-        token_limit, token_limit_source = get_token_limit(tokenizer)
+        token_limit, token_limit_source = get_token_limit(
+            tokenizer, training_model.config)
 
         def count_tokens(text):
             return len(tokenizer(text, add_special_tokens=False).input_ids)
