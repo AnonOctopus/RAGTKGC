@@ -137,10 +137,12 @@ class TrainingControllerCallback(TrainerCallback):
         self._trainer = None
 
     def set_trainer(self, trainer) -> None:
-        """
-        Call this after constructing the Trainer so the controller can access
-        the optimizer directly.  The Trainer does not pass it through
-        on_evaluate kwargs, so a back-reference is the cleanest solution.
+        """Give the controller a back-reference to the Trainer.
+
+        Args:
+            trainer: the Trainer this callback is attached to. Used as a
+                fallback source for the optimizer and scheduler when the
+                callback handler does not supply them in kwargs.
         """
         self._trainer = trainer
 
@@ -177,13 +179,16 @@ class TrainingControllerCallback(TrainerCallback):
 
         step = state.global_step
 
-        # Resolve optimizer and lr_scheduler from the stored trainer reference
-        # (Trainer does not pass them through on_evaluate kwargs).
-        optimizer    = getattr(self._trainer, "optimizer",    None) if self._trainer else None
-        lr_scheduler = getattr(self._trainer, "lr_scheduler", None) if self._trainer else None
+        # Trainer's callback handler passes both through kwargs; the stored
+        # trainer reference is the fallback, because on some versions the
+        # attributes are unset while the handler still holds the live objects.
+        optimizer = kwargs.get("optimizer") or (
+            getattr(self._trainer, "optimizer", None) if self._trainer else None)
+        lr_scheduler = kwargs.get("lr_scheduler") or (
+            getattr(self._trainer, "lr_scheduler", None) if self._trainer else None)
 
         # 1. Track current LR before any modification
-        current_lr = self._read_lr(optimizer, lr_scheduler)
+        current_lr = self._read_lr(optimizer, lr_scheduler, state)
         self._last_known_lr = current_lr
 
         # 2. Smooth validation loss via EMA
@@ -334,17 +339,19 @@ class TrainingControllerCallback(TrainerCallback):
     # Learning rate helpers
     # ------------------------------------------------------------------
 
-    def _read_lr(self, optimizer, lr_scheduler=None) -> float:
+    def _read_lr(self, optimizer, lr_scheduler=None, state=None) -> float:
         """The learning rate currently in effect.
 
         Args:
             optimizer: the training optimizer, or None if unavailable.
             lr_scheduler: the schedule driving it, or None. Preferred source,
                 because it is what Trainer itself reports.
+            state: TrainerState, or None. Used only as a last resort, to read
+                the learning rate out of the most recent training log entry.
 
         Returns:
             float: the active learning rate, or the last one successfully read
-                when neither source can supply it.
+                when no source can supply it.
         """
         # The scheduler first. Reading param_groups[0] alone is not reliable:
         # the optimizer is built with several groups, and the first is not
@@ -367,6 +374,13 @@ class TrainingControllerCallback(TrainerCallback):
                 return active[0]
             if rates:
                 return rates[0]
+
+        # Neither object reached us. Trainer logs the rate it used alongside
+        # the training loss, so the newest such entry is an accurate reading.
+        for entry in reversed(getattr(state, "log_history", None) or []):
+            rate = entry.get("learning_rate")
+            if rate is not None:
+                return float(rate)
         return self._last_known_lr
 
     def _apply_lr_reduction(self, optimizer, lr_scheduler) -> float:
