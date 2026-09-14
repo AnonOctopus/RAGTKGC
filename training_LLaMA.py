@@ -102,6 +102,16 @@ def parser():
               "trained either way."),
     )
     parser.add_argument(
+        "--no_gradient_checkpointing",
+        dest="gradient_checkpointing", action="store_false",
+        help=("Keep every layer's activations for the backward pass instead of "
+              "recomputing them. Faster per step, but the adapter sits inside "
+              "all 32 blocks so gradients flow through the whole network and "
+              "every activation is retained: at batch 4 that is over 70 GiB. On "
+              "the 4bit path this was always on, because "
+              "prepare_model_for_kbit_training enables it."),
+    )
+    parser.add_argument(
         "--per_device_batch_size", type=int, default=1,
         help=("Sequences per forward pass. Was fixed at 1, and had to be: the "
               "collator indexed the last position of the row and the tokenizer "
@@ -506,6 +516,23 @@ if __name__ == "__main__":
     # and running it there would cast layers away from the dtype just chosen.
     if args.precision == "4bit":
         training_model = prepare_model_for_kbit_training(training_model) # This method wraps the entire protocol for preparing a model before running a training.
+
+    # Trade compute for memory by recomputing activations in the backward pass
+    # rather than storing them. Not optional in practice here: the adapter is in
+    # every block, so nothing can be discarded on the way forward, and a 7B at
+    # batch 4 with sequences up to 2,600 tokens exhausts an 80 GiB card without
+    # it. prepare_model_for_kbit_training turns this on for the quantised path,
+    # which is why it only became visible on the bf16 one.
+    if args.gradient_checkpointing:
+        training_model.gradient_checkpointing_enable()
+        # With the base model frozen, the inputs to a checkpointed block carry no
+        # gradient and recomputation has nothing to attach to; this makes the
+        # embedding output require grad so the chain reaches the adapters.
+        training_model.enable_input_require_grads()
+        # The KV cache is for generation and conflicts with checkpointing.
+        training_model.config.use_cache = False
+    logger.info("Gradient checkpointing: %s",
+                "on" if args.gradient_checkpointing else "off")
 
     # If PEFT is desired, then get the peft version of the model, else disable it.
     training_model = get_peft_model(training_model, lora_config, low_cpu_mem_usage = False) # feel free to put any config file from above. low_cpu_mem_usage — Create empty adapter weights on meta device. Useful to speed up the loading process. Leave this setting as False if you intend on training the model -> https://huggingface.co/docs/peft/package_reference/peft_model
