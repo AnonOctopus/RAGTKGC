@@ -261,6 +261,17 @@ def get_args():
     # Evaluate only the first N samples. For smoke-testing a change to the
     # decoder without paying for the whole split.
     parser.add_argument("--limit", default=None, type=int)
+    # Which precision the frozen base is served in. A LoRA adapter is a
+    # low-rank correction to a particular copy of the base weights, so serving
+    # it over a differently quantised copy changes what it was trained to
+    # correct. The default matches training_LLaMA.py's, which keeps the two
+    # halves consistent without anyone having to remember. Adapters trained
+    # under 4bit need it passed explicitly.
+    # LLaMA only: the T5 path is unquantised and ignores this.
+    parser.add_argument("--precision", choices=["4bit", "bf16"], default="bf16",
+                        type=str,
+                        help="Precision of the frozen base model at inference. "
+                             "Match the precision the adapter was trained with.")
     parser.add_argument("--verbose", default=False, action="store_true")  # print extra information
     parser.add_argument("--tail_truncate_long_inputs", default=False, action="store_true")  # truncate from the tail (oldest history) instead of head when input exceeds token limit
 

@@ -183,19 +183,30 @@ if __name__ == "__main__":
             return len(tokenizer(text, add_special_tokens=False).input_ids)
 
     elif args.base_model == 'TheBloke/Llama-2-7B-fp16':
-        bnb4_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type='nf4',
-            bnb_4bit_compute_dtype='float16',
-            bnb_4bit_use_double_quant=True,
-        )
         tokenizer = AutoTokenizer.from_pretrained(args.base_model)
         tokenizer.pad_token_id = tokenizer.eos_token_id
-        training_model = AutoModelForCausalLM.from_pretrained(
-            args.base_model,
-            device_map="auto",
-            quantization_config=bnb4_config,
-        )
+        if args.precision == '4bit':
+            bnb4_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype='float16',
+                bnb_4bit_use_double_quant=True,
+            )
+            training_model = AutoModelForCausalLM.from_pretrained(
+                args.base_model,
+                device_map="auto",
+                quantization_config=bnb4_config,
+            )
+        else:
+            # transformers 5 renamed from_pretrained's `torch_dtype` to
+            # `dtype`; both spellings are tried so one script runs on either.
+            try:
+                training_model = AutoModelForCausalLM.from_pretrained(
+                    args.base_model, device_map="auto", dtype=torch.bfloat16)
+            except TypeError:
+                training_model = AutoModelForCausalLM.from_pretrained(
+                    args.base_model, device_map="auto",
+                    torch_dtype=torch.bfloat16)
         model = PeftModelForCausalLM.from_pretrained(
             training_model, models_path + args.finetuned_model
         )
@@ -327,6 +338,9 @@ if __name__ == "__main__":
 
     if model is not None:
         logger.info("Model loaded — base: %s  device: %s", args.base_model, model.device.type)
+        if args.base_model == 'TheBloke/Llama-2-7B-fp16':
+            logger.info("Base precision: %s (must match the adapter's training)",
+                        args.precision)
     else:
         logger.info("OpenAI model: %s", openai_model_name)
     logger.info("Token limit : %d  (source: %s)", token_limit, token_limit_source)

@@ -2770,6 +2770,78 @@ stage 4 exists to catch; if the winner fails to reproduce, screen at 512 instead
 The controller helps here: `patience=2` stops plateaued runs early, so a bad
 configuration costs less than a good one.
 
+### LLaMA hyperparameter search — results, 2026-09-14
+
+All runs: ICEWS14, `gtkg_inv_n50_idn`, bare names, bf16, gradient checkpointing
+on, r=8, batch 8 x 1, the same 512-sample validation subset. Directly
+comparable to one another; not to stage 0, which ran 4-bit against 128 samples.
+
+**Stage 1 — learning rate.** 512 training samples, 64 steps, 14.4 min each.
+
+| step | 1e-4 | 3e-4 | 1e-3 |
+|---|---|---|---|
+| 16 | 0.8424 | **0.7487** | 0.7524 |
+| 32 | 0.7474 | **0.6894** | 0.7202 |
+| 48 | 0.7153 | **0.6681** | 0.6859 |
+| 64 | 0.7061 | **0.6599** | 0.6720 |
+
+3e-4 leads at every checkpoint. The ranking is non-monotonic in the learning
+rate, which is what makes the result trustworthy: the truncation confound —
+under linear decay to zero a larger rate travels further in a short run, so the
+largest would win for a reason that does not survive a longer schedule — would
+have produced a monotonic ordering. 1e-3 also showed the instability expected
+of overshoot, `grad_norm` 3.61 at step 32 against ~0.9 for 3e-4.
+
+3e-4 is also the T5 arm's rate, so both arms share one value.
+
+**Stage 5 first, not last — where the ceiling is.** 1024 samples, 2 epochs, 256
+steps, 32.7 min.
+
+| step | epoch | train loss | eval loss |
+|---|---|---|---|
+| 64 | 0.5 | 0.9835 | 0.6540 |
+| 128 | 1.0 | 0.6431 | 0.6299 |
+| 192 | 1.5 | 0.5368 | 0.6287 |
+| 256 | 2.0 | 0.5069 | 0.6273 |
+
+Validation improves by 0.024 over the first epoch and by 0.003 over the second,
+while training loss continues to fall by 0.136. The gap opens from zero at epoch
+1 to 0.120 at epoch 2. This is the onset of overfitting, at the reference
+protocol's own training size — 1024 samples is GenTKG's setup, not a screening
+subset, so the finding applies to the final configuration and not only to the
+search.
+
+Three consequences:
+
+1. **One epoch is most of the benefit.** 0.6299 against 0.6273 for twice the
+   compute. GenTKG's ~128-step protocol sits at the point where validation
+   stops improving, which is evidence their choice was not arbitrary.
+2. **Capacity is not the binding constraint**, so stage 2 loses most of its
+   value: raising rank at a fixed 1024 samples adds capacity to a model already
+   fitting the training set faster than it generalises.
+3. **Stage 3 is back on.** It had been marked skippable after stage 0 showed a
+   still-falling curve at 128 steps in 4-bit. That reading was correct for that
+   run and wrong as a general conclusion — the curve was falling because the run
+   was short, not because the configuration was under-regularised. At 256 steps
+   the picture reverses, and dropout becomes the relevant knob rather than rank.
+
+**Serving precision, found while preparing the test run.** `run_hf.py` loaded
+the LLaMA base hard-coded to 4-bit NF4, with no way to change it, while these
+adapters are trained against bf16 weights. An adapter is a low-rank correction
+to a particular copy of the frozen weights, so serving it over a quantised copy
+changes what it was trained to correct, and the resulting Hits@k would have
+understated the model for a reason unrelated to any hyperparameter. `--precision`
+now selects it, defaults to bf16 to match `training_LLaMA.py`, and is recorded
+in the run manifest. LLaMA results produced before this need `--precision 4bit`
+to reproduce.
+
+**What the plateau costs the search.** Configurations near the plateau separate
+by ~0.002 in `eval_loss`, against a stage 1 spread of 0.046. The risk stated in
+advance — that `eval_loss` is a proxy for Hits@k rather than the same quantity —
+is now the gating question, because differences that small may not survive the
+translation to a ranking metric. Validate the proxy before spending further runs
+on knobs that move `eval_loss` by less than stage 1's spread.
+
 ### Phase 4 — remaining groups
 
 This is the expensive phase and the one that makes the comparison defensible.
