@@ -1,10 +1,15 @@
 # import the required classes, feel free to add any other PeftConfig type
 
 import argparse
+import inspect
 import json
 import logging
+import math
 import os
 import time
+
+import torch
+import transformers
 from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, DataCollatorForLanguageModeling, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
@@ -86,6 +91,31 @@ def parser():
     parser.add_argument(
         "--num_train_epochs", type=float, default=1,
         help="Passes over the training file. The dominant term in run cost.",
+    )
+    parser.add_argument(
+        "--precision", choices=["bf16", "4bit"], default="bf16",
+        help=("How the base model is held in memory. 'bf16' is ~14 GiB for a 7B "
+              "and runs at full speed. '4bit' is QLoRA's NF4 quantisation, ~4 GiB, "
+              "which dequantises weights on every forward pass — the right trade "
+              "on a card that cannot hold the model otherwise, and pure overhead "
+              "on one that can. It also costs some accuracy. Only the adapter is "
+              "trained either way."),
+    )
+    parser.add_argument(
+        "--per_device_batch_size", type=int, default=1,
+        help=("Sequences per forward pass. Was fixed at 1, and had to be: the "
+              "collator indexed the last position of the row and the tokenizer "
+              "pads on the left, so anything larger silently supervised padding "
+              "instead of the answer. Both are fixed, so this is now a free "
+              "throughput lever on a card with memory to spare. Keep "
+              "batch x accumulation constant to leave the optimiser unchanged."),
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps", type=int, default=8,
+        help=("Forward passes per optimiser step. The product with "
+              "--per_device_batch_size is the effective batch, which is what the "
+              "optimiser sees; splitting it differently changes speed, not the "
+              "training signal."),
     )
     parser.add_argument(
         "--eval_steps", type=int, default=16,
@@ -237,6 +267,62 @@ def _length_stats(tokenized):
     }
 
 
+def _build_training_args(desired, logger):
+    """Build TrainingArguments from what this transformers version accepts.
+
+    Remote sessions do not necessarily run the pinned versions, and the argument
+    names have moved between releases — evaluation_strategy became eval_strategy,
+    for one. Passing an unknown name raises TypeError and loses the run, so the
+    requested arguments are matched against the installed signature first.
+
+    Args:
+        desired: argument name to value, using current spellings.
+        logger: where to report renames and anything dropped.
+
+    Returns:
+        TrainingArguments: built from the accepted subset.
+
+    Raises:
+        SystemExit: an argument that changes what the run measures could not be
+            set, so the run would silently do something other than intended.
+    """
+    accepted = set(inspect.signature(TrainingArguments.__init__).parameters)
+    # Spellings this version may use instead. Checked in order.
+    renames = {
+        "eval_strategy": ["evaluation_strategy"],
+        "evaluation_strategy": ["eval_strategy"],
+    }
+
+    final, dropped = {}, []
+    for name, value in desired.items():
+        if name in accepted:
+            final[name] = value
+            continue
+        alternative = next((alt for alt in renames.get(name, []) if alt in accepted), None)
+        if alternative:
+            logger.info("TrainingArguments: %s is spelled %s here.", name, alternative)
+            final[alternative] = value
+        else:
+            dropped.append(name)
+
+    if dropped:
+        logger.warning("TrainingArguments does not accept %s in transformers %s; "
+                       "dropped.", ", ".join(dropped), transformers.__version__)
+    # Dropping these would not fail, it would quietly change the experiment:
+    # no validation, no best-checkpoint selection, or the collator's column
+    # stripped before it is read.
+    critical = {"eval_strategy", "evaluation_strategy", "remove_unused_columns",
+                "load_best_model_at_end"}
+    lost = critical.intersection(dropped)
+    if lost:
+        raise SystemExit(
+            f"Cannot set {', '.join(sorted(lost))} on transformers "
+            f"{transformers.__version__}. These decide whether the run is "
+            "validated at all, so it must not proceed without them."
+        )
+    return TrainingArguments(**final)
+
+
 def _setup_logging(log_path):
     """Log to a file and to stdout at once.
 
@@ -293,8 +379,6 @@ if __name__ == "__main__":
     # Which machine produced these numbers — a remote session is not reproducible
     # from the arguments alone.
     try:
-        import torch
-        import transformers
         logger.info(
             "Environment: torch %s, transformers %s, CUDA %s, device %s",
             torch.__version__, transformers.__version__,
@@ -366,81 +450,42 @@ if __name__ == "__main__":
     # this makes the controller's `patience` count evaluations, not epochs.
     _eval_steps = args.eval_steps
 
-    # warm up: nr of steps where the lr starts from 0 and goes to initial set, to prevent oferfitting on early data
-    training_args = TrainingArguments(output_dir = output_dir,
-                                    # auto_find_batch_size is deliberately not set: it only ever
-                                    # halves the batch size on OOM, and 1 is already the floor
-                                    # (1 // 2 == 0), so it cannot help. What it does do is replace
-                                    # a real OutOfMemoryError with accelerate's much less
-                                    # informative "No executable batch size found, reached zero."
-                                    per_device_train_batch_size=1,
-                                    per_device_eval_batch_size = 1,
-                                    learning_rate = args.learning_rate, # Higher learning rate than full fine-tuning.
-                                    num_train_epochs = args.num_train_epochs,
-                                    # A ratio, not a fixed 20 steps. The reference protocol is
-                                    # ~128 optimiser steps, where 20 is a plausible 16%; a
-                                    # screening run on 256 samples is 32 steps, where the same 20
-                                    # is 62% of the run spent ramping up, and the learning rate
-                                    # being compared would barely be reached. 0.06 matches the
-                                    # Flan-T5 arm and scales with whatever the run turns out to be.
-                                    warmup_ratio = 0.06,
-                                    # Train loss logged wherever validation is measured, so the two
-                                    # curves line up; at the screening default of 20 a short run
-                                    # produced a single point.
-                                    logging_steps  = _eval_steps,
-                                    gradient_accumulation_steps=8,
-                                    # Explicitly 0.0, not commented out. Flan-T5 uses 0.1 because
-                                    # every one of its parameters is updated; here only the LoRA
-                                    # adapter trains, for a few hundred steps, with its own dropout
-                                    # already regularising it. L2 on that is close to inert, and
-                                    # leaving the line disabled made a deliberate difference
-                                    # between the two arms look like an oversight.
-                                    weight_decay = 0.0,
-                                    # target_start is carried on the dataset for the collator.
-                                    # Trainer drops any column the model's forward() does not name,
-                                    # which would remove it before the collator ever sees it.
-                                    remove_unused_columns = False,
-                                    # --- evaluation & checkpointing ---
-                                    # Without an eval file nothing is saved during training; the
-                                    # adapter is written once at the end (see the save block below).
-                                    eval_strategy = 'steps' if _has_eval else 'no',
-                                    eval_steps = _eval_steps if _has_eval else None,
-                                    save_strategy = 'steps' if _has_eval else 'no',
-                                    save_steps = _eval_steps if _has_eval else None,
-                                    save_total_limit = 3,
-                                    load_best_model_at_end = _has_eval,
-                                    metric_for_best_model = 'eval_loss',
-                                    greater_is_better = False,
-                                    # data_seed is left to follow seed. This does not make a run
-                                    # bit-exact: 4-bit quantisation and nondeterministic GPU
-                                    # kernels still vary between runs at the same seed.
-                                    seed = args.seed,
-                                    report_to = 'none') # the list of integrations to report the results and logs to.
     logger.info("LoRA: %s", lora_config.to_dict() if hasattr(lora_config, "to_dict") else lora_config)
-    logger.info("Training arguments: %s", json.dumps({
-        k: training_args.to_dict()[k] for k in (
-            "per_device_train_batch_size", "per_device_eval_batch_size",
-            "gradient_accumulation_steps", "learning_rate", "weight_decay",
-            "num_train_epochs", "warmup_steps", "lr_scheduler_type",
-            "eval_strategy", "eval_steps", "save_strategy", "save_steps",
-            "load_best_model_at_end", "metric_for_best_model", "seed",
-        ) if k in training_args.to_dict()
-    }, indent=2, default=str))
-    
-    # load the model in a 4bit configuration to use QLora; this is how we trained the models, but you can also load them in 8bit or full if enough resources are available
 
-    bnb4_config =  BitsAndBytesConfig(load_in_4bit=True,
-                                bnb_4bit_quant_type='nf4', # precision of the stored weights
-                                bnb_4bit_compute_dtype='bfloat16', # precision of computations
-                                bnb_4bit_use_double_quant=True
-                                )
-    
-    # set your own quantization_config if desired
+    def _load_base_model(**extra):
+        """Load the base model, tolerating the dtype argument's rename.
 
-    training_model = AutoModelForCausalLM.from_pretrained(model,
-                                                            trust_remote_code = True,
-                                                            quantization_config = bnb4_config
-                                                            ) # for training, device_map does not have to be set. check -> https://huggingface.co/docs/transformers/v4.35.0/main_classes/quantization#bitsandbytes-integration
+        transformers 5 renamed from_pretrained's `torch_dtype` to `dtype`. Both
+        spellings are tried so the same script runs on either.
+
+        Args:
+            **extra: forwarded to from_pretrained, minus the dtype argument.
+
+        Returns:
+            PreTrainedModel: the loaded base model.
+        """
+        if args.precision != "bf16":
+            return AutoModelForCausalLM.from_pretrained(
+                model, trust_remote_code=True, **extra)
+        try:
+            return AutoModelForCausalLM.from_pretrained(
+                model, trust_remote_code=True, dtype=torch.bfloat16, **extra)
+        except TypeError:
+            return AutoModelForCausalLM.from_pretrained(
+                model, trust_remote_code=True, torch_dtype=torch.bfloat16, **extra)
+
+    logger.info("Precision: %s", args.precision)
+    if args.precision == "4bit":
+        # QLoRA's NF4. Only worth its dequantisation cost when the model would
+        # not otherwise fit.
+        bnb4_config = BitsAndBytesConfig(load_in_4bit=True,
+                                    bnb_4bit_quant_type='nf4', # precision of the stored weights
+                                    bnb_4bit_compute_dtype='bfloat16', # precision of computations
+                                    bnb_4bit_use_double_quant=True
+                                    )
+        training_model = _load_base_model(quantization_config=bnb4_config)
+    else:
+        training_model = _load_base_model()
     PROMPT_PREFIX = args.prompt_prefix
     logger.info("Prompt prefix: %s (must match the flag used at evaluation)",
                 "on" if PROMPT_PREFIX else "off")
@@ -456,8 +501,11 @@ if __name__ == "__main__":
     # With batch size 1 nothing is padded and the difference never shows.
     tokenizer.padding_side = 'right'
 
-    # If quantization is applied, enable the line, else disable it.
-    training_model = prepare_model_for_kbit_training(training_model) # This method wraps the entire protocol for preparing a model before running a training.
+    # Only for the quantised path: it upcasts norms and embeddings to fp32 and
+    # readies the k-bit layers for gradients. A bf16 model needs none of that,
+    # and running it there would cast layers away from the dtype just chosen.
+    if args.precision == "4bit":
+        training_model = prepare_model_for_kbit_training(training_model) # This method wraps the entire protocol for preparing a model before running a training.
 
     # If PEFT is desired, then get the peft version of the model, else disable it.
     training_model = get_peft_model(training_model, lora_config, low_cpu_mem_usage = False) # feel free to put any config file from above. low_cpu_mem_usage — Create empty adapter weights on meta device. Useful to speed up the loading process. Leave this setting as False if you intend on training the model -> https://huggingface.co/docs/peft/package_reference/peft_model
@@ -548,6 +596,73 @@ if __name__ == "__main__":
             eval_input = eval_input.select(range(args.max_eval_samples))
         logger.info("Evaluation samples: %d (evaluated every %d optimiser steps)",
                     len(eval_input), _eval_steps)
+
+    # Built here, not before the data was read: warmup is a fraction of the run,
+    # and the run's length is only known once the training set is final. Six
+    # percent of a 128-step reference run is ~8 steps; the fixed 20 this used to
+    # pass would have been 62% of a 256-sample screening run, so the learning
+    # rate under comparison would barely have been reached before it decayed.
+    _batch, _accum = args.per_device_batch_size, args.gradient_accumulation_steps
+    logger.info("Effective batch: %d x %d = %d sequences per optimiser step",
+                _batch, _accum, _batch * _accum)
+    _steps_per_epoch = math.ceil(len(tokenized_input) / (_batch * _accum))
+    _total_steps = max(1, math.ceil(_steps_per_epoch * args.num_train_epochs))
+    _warmup_steps = max(1, round(0.06 * _total_steps))
+    logger.info("Schedule: %d optimiser steps (%d per epoch x %g), %d warmup",
+                _total_steps, _steps_per_epoch, args.num_train_epochs, _warmup_steps)
+
+    training_args = _build_training_args({
+        "output_dir": output_dir,
+        # auto_find_batch_size is deliberately not set: it replaces a real
+        # OutOfMemoryError, which says what ran out, with accelerate's "No
+        # executable batch size found, reached zero", which does not. It also
+        # halves silently, changing the effective batch without recording it.
+        "per_device_train_batch_size": _batch,
+        "per_device_eval_batch_size": _batch,
+        "gradient_accumulation_steps": _accum,
+        "learning_rate": args.learning_rate,
+        "num_train_epochs": args.num_train_epochs,
+        "warmup_steps": _warmup_steps,
+        # Train loss logged wherever validation is measured, so the two curves
+        # line up; a fixed 20 gave a short run a single point.
+        "logging_steps": _eval_steps,
+        # Explicitly 0.0, not commented out. Flan-T5 uses 0.1 because every one
+        # of its parameters is updated; here only the LoRA adapter trains, for a
+        # few hundred steps, with its own dropout already regularising it.
+        "weight_decay": 0.0,
+        # Matches how the base model was loaded. On the 4bit path the compute
+        # dtype is already bfloat16 inside the quantised layers.
+        "bf16": True,
+        # target_start is carried on the dataset for the collator. Trainer drops
+        # any column the model's forward() does not name, which would remove it
+        # before the collator ever sees it.
+        "remove_unused_columns": False,
+        # Without an eval file nothing is saved during training; the adapter is
+        # written once at the end (see the save block below).
+        "eval_strategy": 'steps' if _has_eval else 'no',
+        "eval_steps": _eval_steps if _has_eval else None,
+        "save_strategy": 'steps' if _has_eval else 'no',
+        "save_steps": _eval_steps if _has_eval else None,
+        "save_total_limit": 3,
+        "load_best_model_at_end": _has_eval,
+        "metric_for_best_model": 'eval_loss',
+        "greater_is_better": False,
+        # data_seed is left to follow seed. This does not make a run bit-exact:
+        # 4-bit quantisation and nondeterministic GPU kernels still vary.
+        "seed": args.seed,
+        "report_to": 'none',
+    }, logger)
+
+    _dumped = training_args.to_dict()
+    logger.info("Training arguments: %s", json.dumps({
+        k: _dumped[k] for k in (
+            "per_device_train_batch_size", "per_device_eval_batch_size",
+            "gradient_accumulation_steps", "learning_rate", "weight_decay",
+            "num_train_epochs", "warmup_steps", "lr_scheduler_type", "bf16",
+            "eval_strategy", "evaluation_strategy", "eval_steps", "save_strategy",
+            "save_steps", "load_best_model_at_end", "metric_for_best_model", "seed",
+        ) if k in _dumped
+    }, indent=2, default=str))
 
     trainer = Trainer(model = training_model, # We pass in the PEFT version of the foundation model or the standard one if full finetuning is desired
                 args = training_args, #The args for the training.

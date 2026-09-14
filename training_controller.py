@@ -183,7 +183,7 @@ class TrainingControllerCallback(TrainerCallback):
         lr_scheduler = getattr(self._trainer, "lr_scheduler", None) if self._trainer else None
 
         # 1. Track current LR before any modification
-        current_lr = self._read_lr(optimizer)
+        current_lr = self._read_lr(optimizer, lr_scheduler)
         self._last_known_lr = current_lr
 
         # 2. Smooth validation loss via EMA
@@ -334,9 +334,39 @@ class TrainingControllerCallback(TrainerCallback):
     # Learning rate helpers
     # ------------------------------------------------------------------
 
-    def _read_lr(self, optimizer) -> float:
-        if optimizer is not None and hasattr(optimizer, "param_groups") and optimizer.param_groups:
-            return float(optimizer.param_groups[0]["lr"])
+    def _read_lr(self, optimizer, lr_scheduler=None) -> float:
+        """The learning rate currently in effect.
+
+        Args:
+            optimizer: the training optimizer, or None if unavailable.
+            lr_scheduler: the schedule driving it, or None. Preferred source,
+                because it is what Trainer itself reports.
+
+        Returns:
+            float: the active learning rate, or the last one successfully read
+                when neither source can supply it.
+        """
+        # The scheduler first. Reading param_groups[0] alone is not reliable:
+        # the optimizer is built with several groups, and the first is not
+        # necessarily one holding trainable parameters — under PEFT it has been
+        # observed to sit at zero for an entire run while training proceeded
+        # normally, which made the logged LR silently wrong.
+        if lr_scheduler is not None:
+            try:
+                last = lr_scheduler.get_last_lr()
+                if last:
+                    return float(last[0])
+            except (AttributeError, IndexError, TypeError, NotImplementedError):
+                pass
+
+        if optimizer is not None and getattr(optimizer, "param_groups", None):
+            rates = [float(group["lr"]) for group in optimizer.param_groups
+                     if group.get("lr") is not None]
+            active = [rate for rate in rates if rate > 0]
+            if active:
+                return active[0]
+            if rates:
+                return rates[0]
         return self._last_known_lr
 
     def _apply_lr_reduction(self, optimizer, lr_scheduler) -> float:
@@ -363,7 +393,7 @@ class TrainingControllerCallback(TrainerCallback):
                 b * self.lr_reduction_factor for b in lr_scheduler.base_lrs
             ]
 
-        new_lr = float(optimizer.param_groups[0]["lr"])
+        new_lr = self._read_lr(optimizer, lr_scheduler)
         self._last_known_lr = new_lr
         return new_lr
 
