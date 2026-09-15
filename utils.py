@@ -261,6 +261,13 @@ def get_args():
     # Evaluate only the first N samples. For smoke-testing a change to the
     # decoder without paying for the whole split.
     parser.add_argument("--limit", default=None, type=int)
+    # Prompts per generation call. Beam search replicates the KV cache per
+    # beam, so memory grows with batch x num_beams x sequence length; raise it
+    # while that fits and generation gets several times faster. Defaults to 1,
+    # which is what every recorded result was produced with.
+    parser.add_argument("--batch_size", default=1, type=int,
+                        help="Prompts per generation call. 1 reproduces the "
+                             "unbatched behaviour exactly.")
     # Which precision the frozen base is served in. A LoRA adapter is a
     # low-rank correction to a particular copy of the base weights, so serving
     # it over a differently quantised copy changes what it was trained to

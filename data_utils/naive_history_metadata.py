@@ -61,6 +61,34 @@ class Fact:
     is_indirect: bool = False
 
 
+def normalize_entity(text: str) -> str:
+    """The comparable form of an entity string: bare name, casefolded.
+
+    Args:
+        text: an entity as rendered or as recorded, with or without an "id."
+            prefix.
+
+    Returns:
+        str: the entity name, lowercased and stripped of surrounding space.
+    """
+    # Mirrors utils.normalize_entity, which decides whether a prediction counts
+    # as correct. Kept as a copy rather than an import because utils pulls in
+    # the model stack and this script must run without it; the rule is two
+    # lines and any change to one belongs in both.
+    #
+    # Without it the comparisons below are format-dependent: index_target
+    # prefixes only the object position, so on an "_idn" variant the target
+    # reads "18.Thailand" while a subject reads "Thailand", and a subject-side
+    # match can never succeed. Coverage then reads several points lower on
+    # indexed variants than on bare ones purely as an artifact, which makes the
+    # two look different when they are not.
+    text = text.strip()
+    prefix, sep, name = text.partition(".")
+    if sep and prefix.isdigit():
+        text = name
+    return text.casefold().strip()
+
+
 HISTORY_LINE_PATTERN = re.compile(
     r"^\s*(?P<time>[^:]+):\s*\[(?P<sub>.*?), (?P<rel>.*?), (?P<obj>.*?)\]\s*$"
 )
@@ -835,8 +863,13 @@ def compute_and_write_stats(
             if history_len > 0:
                 nonempty_history += 1
 
+            # Normalised on both sides so the count means the same thing on a
+            # bare variant and an "id.Name" one; see normalize_entity.
+            target_key = normalize_entity(str(query_obj))
             mention_positions = [
-                i for i, fact in enumerate(history) if (fact.obj == query_obj or fact.sub == query_obj)
+                i for i, fact in enumerate(history)
+                if target_key in (normalize_entity(fact.obj),
+                                  normalize_entity(fact.sub))
             ]
             mention_count = len(mention_positions)
             total_target_mentions += mention_count

@@ -8,7 +8,7 @@ from tqdm import tqdm
 from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers import logging as tf_logging
 from peft import PeftModelForCausalLM
-from model_utils import max_target_tokens, predict
+from model_utils import max_target_tokens, predict_batch
 from utils import (
     HitsMetric,
     apply_prompt_prefix,
@@ -447,64 +447,97 @@ if __name__ == "__main__":
                 f"over the model's {token_limit}-token limit. --prompt_prefix "
                 "cannot be used with this model.")
 
-    with (
-        torch.no_grad(),
-        open(filename, "w", encoding="utf-8") as writer,
-        tqdm(test_set) as pbar,
-    ):
-        for i, x in enumerate(pbar):
+    # --- Pass 1: build every prompt, in dataset order --------------------
+    # Generation is batched below, which needs all the prompts up front, and
+    # batching by similar length needs their sizes. Truncation and the length
+    # statistics stay here, where they see the samples in their original order.
+    rows = []            # the resolved sample per index (rag substitution applied)
+    prompts = []         # what the model is actually given
+    prompt_lens = []     # effective token length, for length-sorted batching
 
-            if test_set_rag and i in indexes:
-                x = test_set_rag[indexes.index(i)]
+    for i, x in enumerate(test_set):
 
-            model_input = x['context']
-            query_line  = x['context'].split('\n')[-1]
+        if test_set_rag and i in indexes:
+            x = test_set_rag[indexes.index(i)]
 
-            input_token_len = count_tokens(model_input)
+        model_input = x['context']
 
-            # Stays equal to input_token_len unless the sample is truncated below.
-            effective_token_len = input_token_len
+        input_token_len = count_tokens(model_input)
 
-            if input_token_len <= history_limit:
-                update_length_stats(below_len_stats, input_token_len)
-            else:
-                counter_above_limit += 1
-                update_length_stats(above_len_stats, input_token_len)
-                if args.tail_truncate_long_inputs and model is not None:
-                    # Re-tokenise with the underlying HF tokenizer, keep the tail
-                    encoded = tokenizer(model_input, add_special_tokens=False)
-                    model_input_ids = encoded['input_ids'][-history_limit:]
-                    model_input = tokenizer.decode(
-                        model_input_ids,
-                        skip_special_tokens=True,
-                        clean_up_tokenization_spaces=False,
-                    )
-                    # Measure the decoded string, not len(model_input_ids).
-                    # Decode-then-encode is not round-trip exact — the slice can
-                    # cut mid-subword — so the truncated prompt can come back
-                    # slightly longer than token_limit. Reporting the sliced id
-                    # count would always read as exactly token_limit and hide
-                    # that. Same add_special_tokens=False convention as every
-                    # other length here; predict() adds one EOS on top.
-                    effective_token_len = count_tokens(model_input)
+        # Stays equal to input_token_len unless the sample is truncated below.
+        effective_token_len = input_token_len
 
-            # After truncation, so the instruction block survives it; its cost
-            # was already reserved out of history_limit above.
-            if args.prompt_prefix:
-                model_input = apply_prompt_prefix(model_input)
-                effective_token_len += prefix_tokens
+        if input_token_len <= history_limit:
+            update_length_stats(below_len_stats, input_token_len)
+        else:
+            counter_above_limit += 1
+            update_length_stats(above_len_stats, input_token_len)
+            if args.tail_truncate_long_inputs and model is not None:
+                # Re-tokenise with the underlying HF tokenizer, keep the tail
+                encoded = tokenizer(model_input, add_special_tokens=False)
+                model_input_ids = encoded['input_ids'][-history_limit:]
+                model_input = tokenizer.decode(
+                    model_input_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                # Measure the decoded string, not len(model_input_ids).
+                # Decode-then-encode is not round-trip exact — the slice can
+                # cut mid-subword — so the truncated prompt can come back
+                # slightly longer than token_limit. Reporting the sliced id
+                # count would always read as exactly token_limit and hide
+                # that. Same add_special_tokens=False convention as every
+                # other length here; predict() adds one EOS on top.
+                effective_token_len = count_tokens(model_input)
 
-            update_length_stats(effective_len_stats, effective_token_len)
+        # After truncation, so the instruction block survives it; its cost
+        # was already reserved out of history_limit above.
+        if args.prompt_prefix:
+            model_input = apply_prompt_prefix(model_input)
+            effective_token_len += prefix_tokens
 
-            # Run prediction
-            if args.base_model == 'openai':
-                predictions = predict_openai(openai_client, openai_model_name, model_input)
-                # logger.info(
-                #     "OpenAI call [sample %d] — prompt tokens: %d\nPROMPT:\n%s\nPREDICTION: %s",
-                #     i, input_token_len, model_input, predictions[0],
-                # )
-            else:
-                predictions = predict(tokenizer, model, model_input, args, max_new_tokens)
+        update_length_stats(effective_len_stats, effective_token_len)
+        rows.append(x)
+        prompts.append(model_input)
+        prompt_lens.append(effective_token_len)
+
+    # --- Pass 2: generate ------------------------------------------------
+    # Batches are formed from prompts of similar length because a batch pads to
+    # its longest member: mixing an 18-token prompt with a 2,600-token one
+    # spends nearly all of the batch's compute on padding. Correct masking
+    # makes the grouping invisible in the output, so this only buys speed —
+    # and a disagreement between sorted and unsorted runs is evidence of a
+    # masking fault rather than a property of the data.
+    predictions_by_index = [None] * len(prompts)
+    batch_size = max(1, args.batch_size)
+    logger.info("Generating with batch size %d%s", batch_size,
+                " (length-sorted)" if batch_size > 1 else "")
+
+    with torch.no_grad(), tqdm(total=len(prompts)) as pbar:
+        if args.base_model == 'openai':
+            for i, prompt in enumerate(prompts):
+                predictions_by_index[i] = predict_openai(
+                    openai_client, openai_model_name, prompt)
+                pbar.update(1)
+        else:
+            order = sorted(range(len(prompts)), key=lambda i: prompt_lens[i])
+            for start in range(0, len(order), batch_size):
+                chunk = order[start:start + batch_size]
+                batch_predictions = predict_batch(
+                    tokenizer, model, [prompts[i] for i in chunk], args,
+                    max_new_tokens)
+                # Back to dataset positions immediately: every consumer of the
+                # results file scores row i against query i, so the sort must
+                # not outlive this loop.
+                for i, preds in zip(chunk, batch_predictions):
+                    predictions_by_index[i] = preds
+                pbar.update(len(chunk))
+
+    # --- Pass 3: score and write, in dataset order -----------------------
+    with open(filename, "w", encoding="utf-8") as writer:
+        for i, x in enumerate(rows):
+            predictions = predictions_by_index[i]
+            query_line = x['context'].split('\n')[-1]
 
             update_length_stats(candidate_stats, len(predictions))
 
@@ -527,7 +560,7 @@ if __name__ == "__main__":
             quad    = [obj, rel, [x['target']], time.strip()]
             example = write_results(quad, predictions, 'tail', writer, args)
             update_metric(example, metric, args, true_objects)
-            pbar.set_postfix(metric.dump())
+    logger.info("Scored %d samples: %s", len(rows), json.dumps(metric.dump()))
 
     # -----------------------------------------------------------------------
     # Post-run statistics

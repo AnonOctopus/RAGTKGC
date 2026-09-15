@@ -189,6 +189,52 @@ if __name__ == "__main__":
     for target, kept in wrong[:3]:
         print(f"       target={target!r}  supervised={kept!r}")
 
+    print("\n6b. batched generation setup (no model needed)")
+    # The three things batching changes for a decoder-only model, each of which
+    # fails silently rather than raising: the padding side, the slice that
+    # removes the echoed prompt, and the split of generate's flattened output
+    # back into one list per prompt. A wrong answer here still looks like a
+    # plausible entity list, so it is checked against the tokenizer directly.
+    import torch as _torch
+    from model_utils import beam_candidates
+    tok.padding_side = "left"
+    two = tok(["short prompt", "a considerably longer prompt than the other one"],
+              return_tensors="pt", padding=True)
+    widths = [int(m.sum()) for m in two["attention_mask"]]
+    check("left padding puts the pad tokens first",
+          int(two["attention_mask"][0][0]) == 0 and int(two["attention_mask"][0][-1]) == 1,
+          f"real tokens per row: {widths}")
+    check("both rows share one prompt width",
+          two["input_ids"].shape[1] == max(widths),
+          f"padded width {two['input_ids'].shape[1]}")
+
+    # Each beam continues with a different, known word. That makes the check
+    # able to fail: a wrong slice point leaks prompt text into the candidate, a
+    # wrong reshape hands row 0 row 1's words, and an off-by-one in either
+    # changes which words come back. Asserting on empty output would not.
+    WORDS = ["Thailand", "Malaysia", "Vietnam"]
+
+    class _Gen:
+        """Stands in for generate: echoes each prompt, then one known word."""
+        def __init__(self, beams, word_ids):
+            self.beams, self.word_ids = beams, word_ids
+
+        def generate(self, **kw):
+            ids = kw["input_ids"]
+            repeated = ids.repeat_interleave(self.beams, dim=0)
+            tails = [self.word_ids[i % self.beams] for i in range(repeated.shape[0])]
+            width = max(len(t) for t in tails)
+            padded = [t + [tok.eos_token_id] * (width - len(t)) for t in tails]
+            return _torch.cat([repeated, _torch.tensor(padded)], dim=1)
+
+    beams = len(WORDS)
+    word_ids = [tok(w, add_special_tokens=False)["input_ids"] for w in WORDS]
+    rows = beam_candidates(tok, _Gen(beams, word_ids), two, 8, beams,
+                           prompt_len=two["input_ids"].shape[1])
+    check("one candidate list per prompt", len(rows) == 2, f"{len(rows)} lists")
+    check("each prompt gets its own beams back",
+          all(r == WORDS for r in rows), f"{rows}")
+
     print("\n7. training arguments build on this version")
     ta = _build_training_args({
         "output_dir": "./_preflight", "per_device_train_batch_size": 1,
