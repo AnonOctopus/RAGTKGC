@@ -279,6 +279,16 @@ def get_args():
                         type=str,
                         help="Precision of the frozen base model at inference. "
                              "Match the precision the adapter was trained with.")
+    # A tokenizer's length is a convention from pretraining, not always an
+    # architectural wall. T5 uses relative position embeddings, which have no
+    # absolute ceiling, so a longer prompt is representable — the model was
+    # simply not trained that far out. The override must match the limit the
+    # model was fine-tuned under; a model trained short and served long sees
+    # inputs unlike anything in its training set.
+    parser.add_argument("--token_limit", default=None, type=int,
+                        help="Override the prompt budget in tokens. Defaults "
+                             "to the tokenizer's own limit. Must match the "
+                             "value training used.")
     parser.add_argument("--verbose", default=False, action="store_true")  # print extra information
     parser.add_argument("--tail_truncate_long_inputs", default=False, action="store_true")  # truncate from the tail (oldest history) instead of head when input exceeds token limit
 

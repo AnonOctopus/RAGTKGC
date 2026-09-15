@@ -253,6 +253,10 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unsupported base_model: {args.base_model!r}")
 
+    if args.token_limit is not None:
+        token_limit = args.token_limit
+        token_limit_source = "--token_limit"
+
     if model is not None:
         model.eval()
 
@@ -508,6 +512,12 @@ if __name__ == "__main__":
     # makes the grouping invisible in the output, so this only buys speed —
     # and a disagreement between sorted and unsorted runs is evidence of a
     # masking fault rather than a property of the data.
+    #
+    # Longest first, so the batch that needs the most memory runs first. Beam
+    # search holds a key/value cache per beam, so the peak is set by
+    # batch x num_beams x the longest prompt in the batch; ascending order
+    # would reach that peak only at the very end, turning an unusable batch
+    # size into a crash after most of the split had already been decoded.
     predictions_by_index = [None] * len(prompts)
     batch_size = max(1, args.batch_size)
     logger.info("Generating with batch size %d%s", batch_size,
@@ -520,7 +530,12 @@ if __name__ == "__main__":
                     openai_client, openai_model_name, prompt)
                 pbar.update(1)
         else:
-            order = sorted(range(len(prompts)), key=lambda i: prompt_lens[i])
+            order = sorted(range(len(prompts)), key=lambda i: prompt_lens[i],
+                           reverse=True)
+            logger.info("Longest prompt %d tokens; peak batch holds %d "
+                        "sequences (%d prompts x %d beams)",
+                        max(prompt_lens), batch_size * args.num_beams,
+                        batch_size, args.num_beams)
             for start in range(0, len(order), batch_size):
                 chunk = order[start:start + batch_size]
                 batch_predictions = predict_batch(

@@ -31,6 +31,46 @@ def parser():
       ),
     )
     parser.add_argument(
+      "--per_device_train_batch_size",
+      type=int,
+      default=8,
+      help=(
+        "Samples per forward pass, and per evaluation pass. Lower it when the GPU cannot "
+        "hold a batch, and raise --gradient_accumulation_steps by the same factor to keep "
+        "the effective batch, and therefore the learning rate, unchanged."
+      ),
+    )
+    parser.add_argument(
+      "--gradient_accumulation_steps",
+      type=int,
+      default=1,
+      help=(
+        "Forward passes accumulated before each optimiser step. The effective batch is this "
+        "times --per_device_train_batch_size."
+      ),
+    )
+    parser.add_argument(
+      "--gradient_checkpointing",
+      action="store_true",
+      help=(
+        "Discard intermediate activations in the forward pass and recompute them during "
+        "the backward one. Trades speed for a large reduction in memory, which is what a "
+        "long --token_limit needs: activation memory, not weight memory, is what a longer "
+        "input consumes."
+      ),
+    )
+    parser.add_argument(
+      "--token_limit",
+      type=int,
+      default=None,
+      help=(
+        "Override the input budget in tokens, above which a prompt is tail-truncated or "
+        "dropped. Defaults to the tokenizer's own limit. T5 uses relative position "
+        "embeddings, so a longer input is representable, but the pretrained model has not "
+        "seen one. Inference must be given the same value."
+      ),
+    )
+    parser.add_argument(
       "--eval_file_path",
       type=str,
       default=None,
@@ -71,6 +111,20 @@ def parser():
 
 
 def get_token_limit(tokenizer_obj):
+    """Read the max input length in tokens a tokenizer declares.
+
+    Args:
+        tokenizer_obj: a loaded tokenizer.
+
+    Returns:
+        int: the limit, from "max_len_single_sentence" if usable, else
+            "model_max_length".
+
+    Raises:
+        ValueError: neither field holds a usable value. Values above one
+            million are treated as unset, since transformers stores a 1e30
+            sentinel when a tokenizer config omits the field.
+    """
     token_limit = getattr(tokenizer_obj, "max_len_single_sentence", None)
     if token_limit is None or token_limit <= 0 or token_limit > 1_000_000:
         token_limit = getattr(tokenizer_obj, "model_max_length", None)
@@ -167,13 +221,15 @@ if __name__ == "__main__":
     training_args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
         # --- batch / accumulation ---
-        # 8, not 2: measured on this laptop's 6 GiB card, a worst-case batch of
-        # 8 (every sample at the token limit) peaks at 3.25 GiB, and throughput
-        # saturates here — 16 fits but is no faster and leaves no headroom.
-        # Note that raising this changes the effective batch, since no gradient
-        # accumulation is configured.
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,        # match train batch to keep VRAM usage predictable
+        # What the optimiser sees is the product of these two, so a card that
+        # cannot hold the per-device batch can halve it and double the
+        # accumulation to train on the same effective batch at the same
+        # learning rate. Attention memory grows with the square of the input
+        # length, so a raised --token_limit is the usual reason to.
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        per_device_eval_batch_size=args.per_device_train_batch_size,
+        gradient_checkpointing=args.gradient_checkpointing,
         # Batches drawn at random pad to their longest member, and inputs range
         # from a few tokens to the limit, so over half of every batch was
         # padding. Grouping by length removes almost all of it.
@@ -218,7 +274,7 @@ if __name__ == "__main__":
     # attention_mask, special_tokens_mask and labels as the Python T5Tokenizer
     # on this corpus, at roughly an order of magnitude less wall-clock.
     tokenizer = T5TokenizerFast.from_pretrained(model)
-    TOKEN_LIMIT = get_token_limit(tokenizer)
+    TOKEN_LIMIT = args.token_limit or get_token_limit(tokenizer)
     TAIL_TRUNCATE_LONG_INPUTS = args.tail_truncate_long_inputs
 
     # set the model to train mode
